@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+datos/
+models/*.pt
+models/*.onnx
+resultados_rwf2000.csv
+ficha_evaluacion.md

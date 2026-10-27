@@ -1,0 +1,6 @@
+# Solo para el modo demo (escena simulada): no instala YOLO ni PyTorch.
+opencv-python>=4.9
+numpy>=1.24
+starlette>=0.37
+uvicorn>=0.29
+pyyaml>=6.0

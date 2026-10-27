@@ -1,0 +1,66 @@
+# VigIA - configuración general
+# Los tiempos están en segundos y las distancias se expresan en "alturas de persona"
+# (altura de la caja de la persona), para que no dependan de la resolución de la cámara.
+
+servidor:
+  host: 127.0.0.1
+  puerto: 8000
+
+# Cámaras que se abren al iniciar. Fuente:
+#   0, 1, ...            -> webcam de la laptop (índice)
+#   rtsp://usuario:clave@IP:554/stream  -> cámara IP
+#   ruta a un .mp4       -> video grabado (se reproduce en bucle)
+camaras:
+  - id: cam1
+    nombre: Webcam laptop
+    fuente: 0
+
+modelos:
+  pose: models/yolo11n-pose.pt       # personas + 17 puntos del esqueleto + seguimiento
+  objetos: models/yolo11n.pt         # mochilas, bolsos, maletas
+  tamano_imagen: 480           # menor = más rápido en CPU
+  confianza: 0.40
+  objetos_cada_n_frames: 3     # el detector de objetos corre 1 de cada N frames
+  rostros: models/face_detection_yunet_2023mar.onnx
+  emociones: models/facial_expression_recognition_mobilefacenet_2022july.onnx
+
+procesamiento:
+  fps_objetivo: 10             # frames analizados por segundo y por cámara
+  ancho_max: 960               # se reduce el frame antes de analizarlo
+
+privacidad:
+  difuminar_rostros: true      # privacidad por diseño: activo por defecto
+  analizar_emociones: false    # opcional: el artículo (PE3) muestra menor aceptación de funciones intrusivas
+  dias_retencion_capturas: 7
+  # Aviso de videovigilancia (página /aviso). La aceptación depende de la finalidad declarada y de
+  # la confianza en quien gestiona los datos (artículo, sección 3.4): complete estos datos.
+  finalidad: Prevenir y atender a tiempo agresiones, caídas, intrusiones y hurtos en las áreas vigiladas.
+  responsable: "[Nombre de la institución responsable]"
+  contacto: "[correo o teléfono para consultas y ejercicio de derechos]"
+
+reglas:
+  violencia:
+    activa: true
+    velocidad_extremidades: 1.8   # alturas/s de muñecas, codos y tobillos respecto del torso
+    distancia_max: 1.2            # distancia entre personas (alturas)
+    duracion_min: 0.6             # segundos sostenidos
+  caida:
+    activa: true
+    angulo_horizontal: 60         # grados del tronco respecto de la vertical
+    descenso_min: 0.35            # caída del centro de cadera (alturas) en <= 2.5 s
+    en_suelo_alerta: 5            # segundos tendido para alerta de "persona en el suelo"
+  merodeo:
+    activa: true
+    tiempo_max: 60                # segundos en la zona (o en cámara si no hay zonas)
+  intrusion:
+    activa: true                  # se dispara al entrar en una zona "restringida"
+  objetos:
+    activa: true
+    tiempo_abandono: 30           # segundos inmóvil sin su dueño cerca
+    distancia_dueno: 2.5          # alturas
+  emociones:
+    alerta_enojo_miedo: false     # alerta si el enojo o miedo se sostiene
+    duracion_min: 4
+
+alertas:
+  enfriamiento: 30                # no repite la misma alerta de la misma persona antes de N s

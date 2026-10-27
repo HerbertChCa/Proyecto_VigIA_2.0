@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VigIA · Panel de vigilancia</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="barra">
+  <div class="marca">
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg>
+    </span>
+    <div>
+      <h1>VigIA</h1>
+      <p>Análisis de comportamiento en cámaras de seguridad</p>
+    </div>
+  </div>
+  <div class="indicadores">
+    <div class="indicador"><span id="ind-camaras">0</span><small>cámaras</small></div>
+    <div class="indicador"><span id="ind-personas">0</span><small>personas</small></div>
+    <div class="indicador pendiente"><span id="ind-pendientes">0</span><small>alertas pendientes</small></div>
+    <div class="conexion" id="conexion" title="Conexión con el servidor"><i></i><span>conectando</span></div>
+  </div>
+  <nav class="acciones">
+    <a class="btn" href="/aviso" target="_blank" title="Aviso de videovigilancia para imprimir">Aviso</a>
+    <button class="btn" id="btn-zonas">Zonas</button>
+    <button class="btn" id="btn-ajustes">Ajustes</button>
+    <button class="btn primario" id="btn-camara">+ Cámara</button>
+  </nav>
+</header>
+
+<div id="aviso-demo" class="aviso" hidden>
+  <strong>Modo demo.</strong> La escena es simulada: personas sintéticas recorren un guion de 100 s con merodeo, intrusión,
+  pelea, caída, mochila abandonada y posible hurto. Para usar la webcam o una cámara IP, ejecute el programa sin <code>--demo</code>.
+</div>
+
+<main class="contenido">
+  <section class="columna-video">
+    <div id="camaras" class="camaras"></div>
+    <h2 class="titulo-seccion">Hoy</h2>
+    <div id="resumen" class="resumen"></div>
+    <div id="operador" class="operador"></div>
+  </section>
+
+  <aside class="columna-alertas">
+    <div class="cabecera-alertas">
+      <h2>Alertas</h2>
+      <div class="filtros">
+        <select id="filtro-tipo" aria-label="Filtrar por tipo">
+          <option value="">Todos los tipos</option>
+        </select>
+        <label class="interruptor" title="Sonido al llegar una alerta"><input type="checkbox" id="sonido"> <span>sonido</span></label>
+      </div>
+    </div>
+    <ol id="alertas" class="alertas"></ol>
+    <p id="sin-alertas" class="vacio">Sin alertas por ahora.</p>
+  </aside>
+</main>
+
+<footer class="pie">
+  Privacidad por diseño: los rostros se difuminan antes de mostrarse o guardarse, las capturas se borran a los
+  <span id="dias-retencion">7</span> días y el video no se graba. Las alertas son señales para un operador humano, no decisiones automáticas: el operador confirma o descarta cada una.
+</footer>
+
+<!-- Ampliación de una captura -->
+<dialog id="dlg-captura" class="dialogo ancho">
+  <form method="dialog" class="dlg-cab"><h3 id="cap-titulo">Captura</h3><button class="cerrar" aria-label="Cerrar">×</button></form>
+  <img id="cap-img" alt="Captura de la alerta">
+  <p id="cap-texto" class="explicacion"></p>
+</dialog>
+
+<!-- Nueva cámara -->
+<dialog id="dlg-camara" class="dialogo">
+  <form method="dialog" class="dlg-cab"><h3>Agregar cámara</h3><button class="cerrar" aria-label="Cerrar">×</button></form>
+  <form id="form-camara" class="formulario">
+    <label>Nombre<input name="nombre" placeholder="Pasillo principal" required></label>
+    <label>Fuente<input name="fuente" placeholder="0  ·  rtsp://usuario:clave@192.168.1.64:554/..." required></label>
+    <div class="ayuda">
+      <p><b>0</b>, <b>1</b>…: webcam de la laptop.</p>
+      <p><b>Hikvision:</b> <code>rtsp://usuario:clave@IP:554/Streaming/Channels/101</code></p>
+      <p><b>Dahua:</b> <code>rtsp://usuario:clave@IP:554/cam/realmonitor?channel=1&amp;subtype=0</code></p>
+      <p><b>Archivo:</b> ruta a un .mp4, que se reproduce en bucle.</p>
+    </div>
+    <div class="botones"><button class="btn primario" type="submit">Agregar</button></div>
+  </form>
+</dialog>
+
+<!-- Editor de zonas -->
+<dialog id="dlg-zonas" class="dialogo ancho">
+  <form method="dialog" class="dlg-cab"><h3>Zonas de vigilancia</h3><button class="cerrar" aria-label="Cerrar">×</button></form>
+  <div class="zonas-barra">
+    <label>Cámara <select id="zona-camara"></select></label>
+    <label>Nombre <input id="zona-nombre" value="Zona 1"></label>
+    <label>Tipo
+      <select id="zona-tipo">
+        <option value="restringida">Restringida (alerta de intrusión)</option>
+        <option value="merodeo">Merodeo (alerta por permanencia)</option>
+      </select>
+    </label>
+  </div>
+  <p class="ayuda-linea">Haga clic sobre la imagen para marcar los vértices y doble clic para cerrar el polígono. Se evalúa la posición de los pies.</p>
+  <div class="lienzo-zonas">
+    <img id="zona-fondo" alt="Imagen actual de la cámara">
+    <canvas id="zona-lienzo"></canvas>
+  </div>
+  <ul id="zona-lista" class="zona-lista"></ul>
+  <div class="botones">
+    <button class="btn" id="zona-deshacer" type="button">Deshacer punto</button>
+    <button class="btn primario" id="zona-guardar" type="button">Guardar zonas</button>
+  </div>
+</dialog>
+
+<!-- Ajustes -->
+<dialog id="dlg-ajustes" class="dialogo">
+  <form method="dialog" class="dlg-cab"><h3>Ajustes</h3><button class="cerrar" aria-label="Cerrar">×</button></form>
+  <form id="form-ajustes" class="formulario ajustes">
+    <fieldset>
+      <legend>Privacidad</legend>
+      <label class="fila"><input type="checkbox" data-ruta="privacidad.difuminar_rostros"> Difuminar rostros</label>
+      <label class="fila"><input type="checkbox" data-ruta="privacidad.analizar_emociones"> Analizar expresiones faciales</label>
+      <p class="nota">El reconocimiento de emociones es poco fiable y está restringido por la ley en algunos contextos
+        (por ejemplo, en trabajo y educación en la Unión Europea). Úselo solo con consentimiento informado.</p>
+    </fieldset>
+    <fieldset>
+      <legend>Reglas</legend>
+      <label class="fila"><input type="checkbox" data-ruta="reglas.violencia.activa"> Violencia</label>
+      <label class="num">Velocidad de extremidades (alturas/s)<input type="number" step="0.1" min="0.5" data-ruta="reglas.violencia.velocidad_extremidades"></label>
+      <label class="fila"><input type="checkbox" data-ruta="reglas.caida.activa"> Caídas</label>
+      <label class="num">Alerta «en el suelo» tras (s)<input type="number" step="1" min="1" data-ruta="reglas.caida.en_suelo_alerta"></label>
+      <label class="fila"><input type="checkbox" data-ruta="reglas.merodeo.activa"> Merodeo</label>
+      <label class="num">Tiempo máximo en zona (s)<input type="number" step="1" min="5" data-ruta="reglas.merodeo.tiempo_max"></label>
+      <label class="fila"><input type="checkbox" data-ruta="reglas.intrusion.activa"> Intrusión en zonas restringidas</label>
+      <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.activa"> Objetos abandonados y posible hurto</label>
+      <label class="num">Tiempo para considerar abandono (s)<input type="number" step="1" min="5" data-ruta="reglas.objetos.tiempo_abandono"></label>
+      <label class="fila"><input type="checkbox" data-ruta="reglas.emociones.alerta_enojo_miedo"> Alertar enojo o miedo sostenidos</label>
+    </fieldset>
+    <div class="botones"><button class="btn primario" type="submit">Guardar</button></div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
