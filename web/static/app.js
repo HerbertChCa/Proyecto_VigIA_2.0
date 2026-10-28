@@ -3,7 +3,9 @@
 
 const TIPOS = {
   violencia: "Violencia", caida: "Caída", en_suelo: "Persona en el suelo", merodeo: "Merodeo",
-  intrusion: "Intrusión", abandono: "Objeto abandonado", hurto: "Posible hurto", emocion: "Emoción",
+  intrusion: "Intrusión", abandono: "Objeto abandonado", hurto: "Posible hurto", robo_vehiculo: "Robo de vehículo",
+  robo_huida: "Robo con huida", vandalismo: "Vandalismo", arma: "Posible arma", aglomeracion: "Aglomeración",
+  estampida: "Huida masiva", emocion: "Emoción",
 };
 const $ = (s) => document.querySelector(s);
 const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
@@ -159,7 +161,10 @@ function conectar() {
   fuente.onerror = () => { ind.className = "conexion caida"; ind.querySelector("span").textContent = "reconectando"; };
   fuente.onmessage = (m) => {
     const { evento, datos } = JSON.parse(m.data);
-    if (evento === "estado") { estado = datos; pintarCamaras(); pintarResumen(); pintarOperador(); }
+    if (evento === "estado") {
+      estado = datos; pintarCamaras(); pintarResumen(); pintarOperador();
+      $("#btn-esqueleto").setAttribute("aria-pressed", String(!!datos.solo_esqueleto));
+    }
     else if (evento === "alerta") llegaAlerta(datos);
     else if (evento === "atendida") {
       const a = alertasCargadas.get(datos.id);
@@ -171,14 +176,84 @@ function conectar() {
 }
 
 // ------------------------------------------------------------------ nueva cámara
-$("#btn-camara").onclick = () => $("#dlg-camara").showModal();
+let modoCamara = "enlace";
+function elegirModo(modo) {
+  modoCamara = modo;
+  document.querySelectorAll(".pestana").forEach((b) => b.classList.toggle("activa", b.dataset.modo === modo));
+  document.querySelectorAll(".panel-modo").forEach((p) => (p.hidden = p.dataset.panel !== modo));
+}
+document.querySelectorAll(".pestana").forEach((b) => (b.onclick = () => elegirModo(b.dataset.modo)));
+const megas = (n) => `${(n / 1048576).toFixed(1)} MB`;
+function mostrarArchivo() {
+  const a = $("#archivo-video").files[0];
+  $("#soltar-texto").innerHTML = a ? `<b></b><br><small>${megas(a.size)} · clic para cambiarlo</small>`
+    : "Arrastre un video aquí o haga clic para elegirlo<br><small>MP4, AVI, MOV, MKV o WEBM · hasta 2 GB</small>";
+  if (a) $("#soltar-texto b").textContent = a.name;
+}
+$("#archivo-video").onchange = mostrarArchivo;
+const soltar = $("#soltar");
+["dragenter", "dragover"].forEach((t) => soltar.addEventListener(t, (e) => { e.preventDefault(); soltar.classList.add("encima"); }));
+["dragleave", "drop"].forEach((t) => soltar.addEventListener(t, () => soltar.classList.remove("encima")));
+soltar.addEventListener("drop", (e) => {
+  e.preventDefault();
+  if (e.dataTransfer.files.length) { $("#archivo-video").files = e.dataTransfer.files; mostrarArchivo(); }
+});
+
+function subirVideo(archivo, titulo) {
+  // se envía el archivo tal cual (sin formulario multiparte) para mostrar el avance de la subida
+  return new Promise((ok, falla) => {
+    const x = new XMLHttpRequest(), barra = $("#subida-progreso");
+    x.open("PUT", `/api/videos?nombre=${encodeURIComponent(archivo.name)}&titulo=${encodeURIComponent(titulo)}`);
+    barra.hidden = false; barra.value = 0;
+    x.upload.onprogress = (e) => { if (e.lengthComputable) barra.value = (100 * e.loaded) / e.total; };
+    x.onload = () => {
+      barra.hidden = true;
+      let r = {}; try { r = JSON.parse(x.responseText); } catch {}
+      x.status < 300 ? ok(r) : falla(new Error(r.error || `Error ${x.status}`));
+    };
+    x.onerror = () => { barra.hidden = true; falla(new Error("Se cortó la conexión durante la subida.")); };
+    x.send(archivo);
+  });
+}
+
+async function esperarDescarga(id) {
+  // los enlaces de YouTube, Facebook o TikTok se descargan en el servidor; se muestra el avance hasta que termina
+  const caja = $("#descarga"), barra = $("#descarga-progreso"), txt = $("#descarga-texto");
+  caja.hidden = false; barra.value = 0;
+  try {
+    for (;;) {
+      await new Promise((ok) => setTimeout(ok, 1000));
+      const d = await api(`/api/descargas/${id}`);
+      if (d.estado === "error") throw new Error(`No se pudo descargar el video: ${d.error}`);
+      barra.value = d.progreso;
+      txt.textContent = d.estado === "descargando" ? `Descargando «${d.titulo || "video"}»… ${Math.round(d.progreso)} %`
+        : d.estado === "lista" ? "Listo" : "Preparando la descarga…";
+      if (d.estado === "lista") return d.camara;
+    }
+  } finally { caja.hidden = true; }
+}
+
+$("#btn-camara").onclick = () => { elegirModo(modoCamara); $("#dlg-camara").showModal(); };
 $("#form-camara").onsubmit = async (e) => {
   e.preventDefault();
-  const f = new FormData(e.target);
+  const f = new FormData(e.target), boton = $("#btn-agregar");
+  const nombre = (f.get("nombre") || "").trim();
+  boton.disabled = true;
   try {
-    await api("/api/camaras", { method: "POST", body: JSON.stringify({ nombre: f.get("nombre"), fuente: f.get("fuente") }) });
-    e.target.reset(); $("#dlg-camara").close();
+    if (modoCamara === "archivo") {
+      const archivo = $("#archivo-video").files[0];
+      if (!archivo) throw new Error("Elija un video de su PC.");
+      boton.textContent = "Subiendo…";
+      await subirVideo(archivo, nombre);
+    } else {
+      const fuente = (f.get("fuente") || "").trim();
+      if (!fuente) throw new Error("Escriba el número de la webcam, la dirección RTSP o el enlace del video.");
+      const r = await api("/api/camaras", { method: "POST", body: JSON.stringify({ nombre: nombre || fuente, fuente }) });
+      if (r.descarga) { boton.textContent = "Descargando…"; await esperarDescarga(r.descarga); }
+    }
+    e.target.reset(); mostrarArchivo(); $("#dlg-camara").close();
   } catch (err) { alert(err.message); }
+  finally { boton.disabled = false; boton.textContent = "Agregar"; }
 };
 
 // ------------------------------------------------------------------ ajustes
@@ -205,7 +280,8 @@ $("#form-ajustes").onsubmit = async (e) => {
 // ------------------------------------------------------------------ editor de zonas
 const lienzo = $("#zona-lienzo"), ctx = lienzo.getContext("2d");
 let zonas = [], puntos = [], camZona = null;
-const COLORES = { restringida: "#e5534b", merodeo: "#e3a33a" };
+const COLORES = { restringida: "#e5534b", merodeo: "#e3a33a", protegida: "#3d7fd0" };
+const franja = (z) => (z.horario ? ` · ${z.horario.desde}-${z.horario.hasta}` : " · todo el día");
 
 function ajustarLienzo() {
   const r = lienzo.getBoundingClientRect(), d = devicePixelRatio || 1;
@@ -232,7 +308,7 @@ function dibujarZonas() {
 function pintarListaZonas() {
   const ul = $("#zona-lista"); ul.replaceChildren();
   zonas.forEach((z, i) => {
-    const li = el("li", null, `${z.nombre} · ${z.tipo}`);
+    const li = el("li", null, `${z.nombre} · ${z.tipo}${franja(z)}`);
     const b = el("button", null, "✕"); b.title = "Eliminar zona";
     b.onclick = () => { zonas.splice(i, 1); pintarListaZonas(); dibujarZonas(); };
     li.append(b); ul.append(li);
@@ -263,7 +339,10 @@ lienzo.ondblclick = () => {
     if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 0.01) puntos.pop(); else break;
   }
   if (puntos.length < 3) return;
-  zonas.push({ nombre: $("#zona-nombre").value || "Zona", tipo: $("#zona-tipo").value, puntos });
+  const z = { nombre: $("#zona-nombre").value || "Zona", tipo: $("#zona-tipo").value, puntos };
+  const desde = $("#zona-desde").value, hasta = $("#zona-hasta").value;
+  if (desde && hasta && desde !== hasta) z.horario = { desde, hasta };   // vacío = activa todo el día
+  zonas.push(z);
   puntos = []; $("#zona-nombre").value = `Zona ${zonas.length + 1}`;
   pintarListaZonas(); dibujarZonas();
 };
@@ -273,6 +352,45 @@ $("#zona-guardar").onclick = async () => {
   $("#dlg-zonas").close();
 };
 addEventListener("resize", () => { if ($("#dlg-zonas").open) ajustarLienzo(); });
+
+// ------------------------------------------------------------------ modo solo esqueleto
+$("#btn-esqueleto").onclick = async () => {
+  const b = $("#btn-esqueleto"), activo = b.getAttribute("aria-pressed") !== "true";
+  b.setAttribute("aria-pressed", String(activo));
+  await api("/api/ajustes", { method: "PUT", body: JSON.stringify({ privacidad: { solo_esqueleto: activo } }) });
+};
+
+// ------------------------------------------------------------------ búsqueda con CLIP
+function estadoBusqueda(d) {
+  const txt = d.estado === "lista"
+    ? `${d.total} capturas indexadas${d.pendientes ? `, ${d.pendientes} en cola` : ""}. Escriba lo que quiere encontrar, en español o en inglés.`
+    : d.estado === "apagada" ? "La búsqueda está apagada: actívela en Ajustes → Búsqueda con CLIP."
+    : `Búsqueda: ${d.estado}.`;
+  $("#buscar-estado").textContent = txt;
+}
+$("#btn-buscar").onclick = async () => {
+  $("#dlg-buscar").showModal(); $("#buscar-texto").focus();
+  estadoBusqueda(await api("/api/buscar"));
+};
+$("#form-buscar").onsubmit = async (e) => {
+  e.preventDefault();
+  const q = $("#buscar-texto").value.trim(); if (!q) return;
+  const cont = $("#buscar-resultados"); cont.replaceChildren(el("p", "vacio", "Buscando…"));
+  const r = await fetch(`/api/buscar?q=${encodeURIComponent(q)}&k=18`); const d = await r.json();
+  estadoBusqueda(d);
+  if (!r.ok) { cont.replaceChildren(el("p", "vacio", d.error)); return; }
+  if (!d.resultados.length) { cont.replaceChildren(el("p", "vacio", "No hay capturas todavía.")); return; }
+  const max = d.resultados[0].puntaje;
+  cont.replaceChildren(...d.resultados.map((res) => {
+    const a = res.alerta, t = el("button", "resultado");
+    const img = el("img"); img.src = `/capturas/${res.captura}`; img.loading = "lazy"; img.alt = a ? a.mensaje : res.captura;
+    t.append(img, el("b", null, a ? a.tipo_nombre : "Captura"), el("small", null, a ? `${a.camara} · ${fechaCorta(a.fecha)}` : res.captura));
+    const barra = el("i", "similitud"); barra.style.width = `${Math.max(8, (100 * res.puntaje) / max)}%`;
+    barra.title = `similitud ${res.puntaje.toFixed(3)}`; t.append(barra);
+    if (a) t.onclick = () => abrirCaptura(a);
+    return t;
+  }));
+};
 
 // ------------------------------------------------------------------ inicio
 const sel = $("#filtro-tipo");

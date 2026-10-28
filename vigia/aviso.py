@@ -15,6 +15,11 @@ DESCRIPCION = {
     "merodeo": "permanencia prolongada en zonas definidas",
     "intrusion": "ingreso a zonas restringidas",
     "objetos": "objetos abandonados y su posible sustracción",
+    "vehiculos": "manipulación de vehículos estacionados por personas distintas de quien los dejó",
+    "huida": "personas que tocan a otra y huyen corriendo (posible arrebato)",
+    "vandalismo": "golpes contra vehículos o zonas protegidas",
+    "armas": "objetos como cuchillos o bates en la mano de una persona",
+    "aglomeracion": "aglomeraciones y huidas masivas",
 }
 
 
@@ -25,7 +30,9 @@ def pagina_aviso(cfg: dict, n_camaras: int) -> str:
     if p.get("analizar_emociones"):
         activas.append("expresiones faciales, solo con fines informativos")
     no_hace = ["No identifica a las personas: no usa reconocimiento facial ni guarda identidades."]
-    if p.get("difuminar_rostros"):
+    if p.get("solo_esqueleto"):
+        no_hace.append("No muestra ni guarda la imagen de las personas: solo una figura de su esqueleto.")
+    elif p.get("difuminar_rostros"):
         no_hace.append("Los rostros se pixelan antes de mostrarse o guardarse.")
     no_hace += [
         "No graba video de forma continua: solo guarda una imagen cuando se genera una alerta.",

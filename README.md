@@ -13,10 +13,17 @@ cámaras IP (RTSP), detecta comportamientos de riesgo y los muestra en un panel 
 | Merodeo | Permanencia mayor a 60 s en una zona de «merodeo» (o en la cámara si no hay zonas) | Media |
 | Objeto abandonado | Mochila, bolso o maleta inmóvil ≥ 30 s sin nadie a menos de 2.5 alturas | Media |
 | Posible hurto | Un objeto que estaba quieto y asociado a una persona se desplaza junto a otra persona | Alta |
+| Robo de vehículo | Alguien distinto de quien estacionó la moto, bicicleta o auto se sube o se queda sobre él ≥ 3 s; alta si se lo lleva | Media / Alta |
+| Robo con huida | Una mano o un pie de A llega al cuerpo de B y, en los 4 s siguientes, A corre (≥ 1.6 alturas/s) mientras B no | Alta |
+| Vandalismo | Una persona sola (nadie a menos de 1.5 alturas) golpea rápido un vehículo o una zona «protegida» | Alta |
+| Posible arma | Un cuchillo o un bate detectado ≥ 2 veces en 2 s a menos de 0.3 alturas de una muñeca | Alta |
+| Aglomeración | 15 personas o más durante ≥ 5 s | Media |
+| Huida masiva | 4 personas o más, y al menos la mitad de las presentes, corren a la vez | Alta |
 | Expresión facial (opcional) | Alegría, neutral, sorpresa, tristeza, enojo, miedo o desagrado, por persona; apagada por defecto | Informativa |
 
 Todas las distancias se miden en «alturas de persona», así que las reglas no dependen de la resolución ni de la
 distancia a la cámara. Todos los umbrales se cambian en `config.yaml` o desde **Ajustes** en el panel.
+Cada zona puede tener un **horario** (por ejemplo, 22:00 a 06:00, cruzando la medianoche): fuera de esa franja no alerta.
 
 ## Fundamento en el artículo de revisión
 
@@ -27,7 +34,7 @@ que analizó 48 estudios (E01-E48). Cada decisión de diseño responde a un hall
 | Hallazgo del artículo | Decisión en VigIA | Dónde |
 |---|---|---|
 | PE2: dominan las CNN 2D supervisadas (47.7 %); los enfoques por esqueleto no conservan la apariencia y podrían mejorar la aceptación (E18, E39; sección 4.2) | Analizar la **pose** (17 puntos) con reglas, no la apariencia | `modelos.py`, `reglas.py` |
-| El corpus estudia violencia (RWF-2000: E18, E20, E24, E30, E39), agresión y caídas con reglas en el borde (E24), merodeo con YOLO + seguimiento (E22) y robo o hurto (E17, E37) | Siete comportamientos con esas mismas técnicas: YOLO11 + ByteTrack + reglas | `reglas.py` |
+| El corpus estudia violencia (RWF-2000: E18, E20, E24, E30, E39), agresión y caídas con reglas en el borde (E24), merodeo con YOLO + seguimiento (E22) y robo o hurto (E17, E37) | Trece tipos de alerta con esas mismas técnicas (YOLO11 + ByteTrack + reglas sobre la pose): los siete del guion demo y seis que completan el mapa de actos maliciosos | `reglas.py` |
 | PE4: el tiempo real preocupa a 36 de 44 estudios, pero solo 17 miden la velocidad; la salida es el borde y la eficiencia (E24, E34, E36, E40, E44) | Modelos *nano* en CPU, detector de objetos 1 de cada 3 frames, FPS visible en el panel y latencia medida | `modelos.py`, `camara.py` |
 | Brecha metodológica: 15 de 44 reportan solo *accuracy*; falta un conjunto mínimo de métricas (AUC, F1, latencia y hardware) | La evaluación entrega esa **ficha** completa en `ficha_evaluacion.md` | `scripts/evaluar_rwf2000.py` |
 | Brecha de validación: solo 2 de 44 evalúan con datos externos y el desempeño cae 4 a 10 puntos (E20, E37) | Modo `--umbral` fijo para validar en otros datos y **veredicto del operador** que mide la precisión real de cada instalación | `evaluar_rwf2000.py`, `alertas.py` |
@@ -35,7 +42,10 @@ que analizó 48 estudios (E01-E48). Cada decisión de diseño responde a un hall
 | Brecha de explicabilidad: solo 3 estudios usan Grad-CAM (E25, E37, E41) y ninguno lo evalúa con operadores | Cada alerta trae su medida, su captura y los botones **Confirmar / Falsa alarma**, que permiten medir si la explicación ayuda | `reglas.py`, `alertas.py`, `web/` |
 | Solo 6 de 44 tratan la privacidad | Rostros pixelados por defecto, procesamiento local, sin grabación continua, capturas borradas a los 7 días | `dibujo.py`, `config.yaml` |
 | PE3: la aceptación es condicional al propósito (82.2 % para un fin protector, E45), el reconocimiento facial es poco aceptado (36 %, E46) y la confianza depende de la institución (E48) | Página **/aviso** con finalidad, responsable y lo que el sistema no hace; sin reconocimiento facial; emociones opcionales y apagadas por defecto | `aviso.py`, `config.yaml` |
-| Brecha tecnológica: 0 de 44 usan modelos de visión-lenguaje | No se incluyen; la ficha de evaluación permite compararlos después con el mismo protocolo | Trabajo futuro |
+| Brecha tecnológica: 0 de 44 usan modelos de visión-lenguaje | **Búsqueda con CLIP** multilingüe sobre las capturas; la detección sigue siendo por reglas, comparables con la ficha de evaluación | `busqueda.py` |
+| PE3 y brecha contextual: aceptación condicional y un solo estudio latinoamericano | **Encuesta** de aceptación en la feria con preguntas inspiradas en E45-E48 y resultados comparados en vivo | `encuesta.py`, `web/encuesta.html` |
+| Los enfoques por esqueleto no conservan la apariencia (E18, E39) | Modo **solo esqueleto**: las personas se borran de la imagen y la detección no cambia | `dibujo.py` |
+| Brecha de validación: faltan pruebas con personas reales | **Retos** de la feria: cada intento suma a la tasa de detección real de cada regla | `reto.py`, `web/reto.html` |
 
 Las implicancias prácticas del artículo piden exigir AUC o F1 en cámaras propias, la latencia medida en el hardware
 que se usará y salvaguardas comunicadas a la población. VigIA entrega las tres: la ficha de evaluación, el veredicto
@@ -74,6 +84,65 @@ python scripts/descargar_modelos.py
 python -m vigia            # o: python -m vigia --demo
 ```
 
+## Analizar un video sin tocar el código
+
+En el panel, **+ Cámara** tiene dos pestañas:
+
+- **Video de mi PC:** elija o arrastre un archivo (MP4, AVI, MOV, MKV o WEBM, hasta 2 GB). Se copia a
+  `datos/videos/`, se analiza en bucle y se borra al quitar la cámara.
+- **Cámara o enlace:** el número de la webcam, una dirección RTSP o el enlace **directo** a un video (`…/video.mp4`)
+  o a una transmisión (`…/stream.m3u8`).
+- **Enlaces de YouTube, Facebook o TikTok:** son páginas, no videos, así que VigIA los descarga con yt-dlp (hasta
+  20 min, 720p, sin audio) en `datos/videos/` y los agrega como cámara; el archivo se borra al quitarla. Instale una
+  vez:
+
+  ```bat
+  .venv\Scripts\pip install -r requirements-enlaces.txt
+  winget install DenoLand.Deno
+  ```
+
+  Deno es el intérprete de JavaScript que yt-dlp necesita para YouTube. Si un día deja de descargar, actualice
+  con `.venv\Scripts\pip install -U "yt-dlp[default]"`, porque YouTube cambia a menudo. Las condiciones de esas
+  plataformas no permiten descargar sin permiso del autor: úselo solo para pruebas internas y no suba los videos
+  al repositorio.
+
+## Modo feria: retos, encuesta y solo esqueleto
+
+```bat
+iniciar.bat --feria
+```
+
+- **Reto** (`/reto`, se abre solo): el visitante elige un reto (simular una caída, entrar a la zona prohibida,
+  merodear, abandonar una mochila, llevarse la de otro o sonreír), hay una cuenta regresiva y VigIA intenta
+  detectarlo. Muestra en cuántos segundos lo detectó y **por qué** (la explicación de la alerta). El marcador
+  acumula la tasa de detección real de la feria. Los tiempos se acortan (merodeo 10 s, abandono 8 s, en el
+  suelo 3 s). Dibuje antes en **Zonas** una zona restringida y una de merodeo sobre el piso del stand y ponga una
+  colchoneta para el reto de la caída.
+- **Encuesta** (`/encuesta`): anónima, solo para mayores de edad, con las preguntas de aceptación de la PE3 del
+  artículo. Los visitantes escanean el QR con su celular; `/encuesta/resultados` muestra los resultados en vivo,
+  comparados con E45 (82.2 %) y E46 (36 %). **Exportar CSV** descarga las respuestas para el informe.
+- **Solo esqueleto** (botón del panel y del reto): borra a las personas de la imagen y deja solo su esqueleto,
+  también en las capturas. La detección funciona igual porque las reglas usan la pose.
+
+Con `--feria` el servidor escucha en la red local, pero desde otros equipos **solo** se abren la encuesta, sus
+resultados y el aviso; el panel, los ajustes y las alertas siguen siendo solo de la PC de VigIA. Los celulares deben
+estar en la misma red Wi-Fi que la PC. Muchas redes de universidades aíslan a los dispositivos entre sí: si el QR
+no abre, use el punto de acceso de un celular o un router propio. La primera vez, Windows pregunta si permite el
+acceso de Python a la red: permítalo en redes privadas.
+
+## Búsqueda con CLIP (opcional)
+
+```bat
+.venv\Scripts\pip install -r requirements-busqueda.txt
+```
+
+Active **Ajustes → Búsqueda con CLIP**. La primera vez descarga el modelo multilingüe
+`xlm-roberta-base-ViT-B-32` (~1.5 GB, necesita internet). Luego, **Buscar** encuentra capturas de alertas
+escribiendo lo que se ve, en español o en inglés: «persona con mochila», «moto», «alguien en el suelo». Es la
+línea futura del artículo (0 de 44 estudios usan modelos de visión-lenguaje). Solo indexa capturas de alertas, no
+video continuo; las capturas tomadas en modo solo esqueleto no muestran a las personas, así que la búsqueda solo
+ve la escena.
+
 ## Evaluación con RWF-2000
 
 RWF-2000 tiene 2 000 clips de 5 s de cámaras de seguridad reales, con y sin pelea. Se solicita a sus autores en
@@ -108,7 +177,9 @@ python -m unittest discover pruebas -v
 Comprueban la geometría (ángulo del tronco, polígonos), que cada comportamiento del guion demo se detecte una sola vez
 y en el momento correcto, que dos personas que se cruzan caminando no se marquen como pelea, que una persona tendida
 desde el inicio no cuente como caída, que el gestor de alertas evite duplicados, guarde la evidencia y calcule la
-precisión con los veredictos, que el AUC del script de evaluación sea correcto y que el aviso declare la finalidad.
+precisión con los veredictos, que se detecten el robo con huida, el vandalismo, las armas en la mano, la
+aglomeración y la huida masiva (y no sus casos parecidos: irse caminando, golpear con otra persona cerca, un
+cuchillo sobre una mesa), que las zonas respeten su horario, que el AUC del script de evaluación sea correcto y que el aviso declare la finalidad.
 
 ## Estructura
 
@@ -153,6 +224,11 @@ vigia/
 - El posible hurto depende de que el seguidor mantenga el ID del objeto; si el objeto se tapa por completo, se pierde.
 - Con iluminación baja, oclusiones fuertes o personas muy lejanas (menos de unos 60 píxeles de alto) la pose
   se degrada, como advierte la literatura revisada.
+- La detección de armas usa las clases «knife» y «baseball bat» del modelo COCO: a distancia o con poca luz confunde
+  objetos alargados (paraguas, celulares, herramientas) y no detecta armas de fuego. Cada alerta debe verificarse
+  en la captura; es una señal para el operador, no una prueba.
+- Robo con huida y huida masiva dependen de que el seguidor mantenga el ID de quien corre; un corredor que sale
+  del cuadro en menos de un segundo puede no alcanzar a medirse.
 - El modo demo usa personas sintéticas: prueba la lógica y el panel, no la precisión de los modelos.
 
 ## Solución de problemas

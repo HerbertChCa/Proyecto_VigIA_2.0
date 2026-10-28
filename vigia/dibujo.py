@@ -11,7 +11,7 @@ from .tipos import ESQUELETO, Observacion
 COLOR_NORMAL = (180, 200, 60)     # BGR: verde azulado
 COLOR_ALERTA = (60, 60, 235)      # rojo
 COLOR_OBJETO = (40, 180, 240)     # ámbar
-COLOR_ZONA = {"restringida": (70, 70, 220), "merodeo": (40, 170, 240)}
+COLOR_ZONA = {"restringida": (70, 70, 220), "merodeo": (40, 170, 240), "protegida": (200, 120, 60)}
 
 
 def _ascii(s: str) -> str:
@@ -57,8 +57,28 @@ def difuminar(img: np.ndarray, cajas: list[np.ndarray]) -> None:
         img[y1:y2, x1:x2] = cv2.resize(peq, (x2 - x1, y2 - y1), interpolation=cv2.INTER_NEAREST)
 
 
+FONDO_PERSONA = (40, 36, 32)       # BGR: gris oscuro con el que se borra a cada persona
+
+
+def solo_esqueleto(img: np.ndarray, obs: Observacion, margen: float = 0.06) -> None:
+    """Privacidad por diseño: borra la imagen de cada persona detectada y deja solo el fondo.
+
+    Las reglas trabajan con los 17 puntos del esqueleto, no con la apariencia (artículo, sección 4.2:
+    los enfoques por esqueleto no conservan la apariencia). Este modo lo hace visible: el sistema detecta
+    lo mismo sin mostrar ni guardar cómo es la persona. Quien no sea detectado sigue viéndose.
+    """
+    h, w = img.shape[:2]
+    for p in obs.personas:
+        x1, y1, x2, y2 = p.caja
+        mx, my = margen * (x2 - x1), margen * (y2 - y1)
+        x1, y1 = max(0, int(x1 - mx)), max(0, int(y1 - my))
+        x2, y2 = min(w, int(x2 + mx)), min(h, int(y2 + my))
+        if x2 > x1 and y2 > y1:
+            img[y1:y2, x1:x2] = FONDO_PERSONA
+
+
 def dibujar(img: np.ndarray, obs: Observacion, zonas: list[dict], en_alerta: set[int],
-            emociones: dict[int, str], encabezado: str) -> np.ndarray:
+            emociones: dict[int, str], encabezado: str, grueso: bool = False) -> np.ndarray:
     h, w = img.shape[:2]
     capa = img.copy()
     for z in zonas:
@@ -70,17 +90,24 @@ def dibujar(img: np.ndarray, obs: Observacion, zonas: list[dict], en_alerta: set
         pts = (np.array(z["puntos"]) * [w, h]).astype(np.int32)
         col = COLOR_ZONA.get(z.get("tipo"), (200, 200, 200))
         cv2.polylines(img, [pts], True, col, 2, cv2.LINE_AA)
-        _texto(img, f"{z['nombre']} ({z.get('tipo', '')})", pts[0] + [4, 18], col, 0.45)
+        hor = z.get("horario")
+        franja = f" {hor['desde']}-{hor['hasta']}" if hor else ""
+        _texto(img, f"{z['nombre']} ({z.get('tipo', '')}{franja})", pts[0] + [4, 18], col, 0.45)
 
     for p in obs.personas:
         col = COLOR_ALERTA if p.id in en_alerta else COLOR_NORMAL
         x1, y1, x2, y2 = (int(v) for v in p.caja)
-        cv2.rectangle(img, (x1, y1), (x2, y2), col, 2)
+        cv2.rectangle(img, (x1, y1), (x2, y2), col, 1 if grueso else 2)
         if p.puntos is not None:
             for a, b in ESQUELETO:
                 pa, pb = p.punto(a), p.punto(b)
                 if pa is not None and pb is not None:
-                    cv2.line(img, tuple(pa.astype(int)), tuple(pb.astype(int)), col, 1, cv2.LINE_AA)
+                    cv2.line(img, tuple(pa.astype(int)), tuple(pb.astype(int)), col, 3 if grueso else 1, cv2.LINE_AA)
+            if grueso:                                   # articulaciones visibles en el modo solo esqueleto
+                for i in range(17):
+                    q = p.punto(i)
+                    if q is not None:
+                        cv2.circle(img, tuple(q.astype(int)), 4, (235, 235, 235), -1, cv2.LINE_AA)
         etiqueta = f"#{p.id}"
         if p.id in emociones:
             etiqueta += f" {emociones[p.id]}"

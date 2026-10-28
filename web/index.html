@@ -24,6 +24,10 @@
     <div class="conexion" id="conexion" title="Conexión con el servidor"><i></i><span>conectando</span></div>
   </div>
   <nav class="acciones">
+    <a class="btn" href="/reto" target="_blank" title="Pantalla de retos para la feria">Reto</a>
+    <a class="btn" href="/encuesta/resultados" target="_blank" title="Encuesta de aceptación y resultados en vivo">Encuesta</a>
+    <button class="btn" id="btn-esqueleto" aria-pressed="false" title="Borra a las personas de la imagen y deja solo su esqueleto">Solo esqueleto</button>
+    <button class="btn" id="btn-buscar" title="Buscar capturas escribiendo lo que se ve (CLIP)">Buscar</button>
     <a class="btn" href="/aviso" target="_blank" title="Aviso de videovigilancia para imprimir">Aviso</a>
     <button class="btn" id="btn-zonas">Zonas</button>
     <button class="btn" id="btn-ajustes">Ajustes</button>
@@ -71,19 +75,50 @@
   <p id="cap-texto" class="explicacion"></p>
 </dialog>
 
+<!-- Búsqueda con CLIP -->
+<dialog id="dlg-buscar" class="dialogo ancho">
+  <form method="dialog" class="dlg-cab"><h3>Buscar en las capturas</h3><button class="cerrar" aria-label="Cerrar">×</button></form>
+  <form id="form-buscar" class="buscar-barra">
+    <input id="buscar-texto" placeholder="Por ejemplo: persona con mochila, moto, alguien en el suelo, de noche" autocomplete="off">
+    <button class="btn primario" type="submit">Buscar</button>
+  </form>
+  <p id="buscar-estado" class="ayuda-linea"></p>
+  <div id="buscar-resultados" class="buscar-resultados"></div>
+</dialog>
+
 <!-- Nueva cámara -->
 <dialog id="dlg-camara" class="dialogo">
   <form method="dialog" class="dlg-cab"><h3>Agregar cámara</h3><button class="cerrar" aria-label="Cerrar">×</button></form>
+  <div class="pestanas" role="tablist">
+    <button type="button" class="pestana activa" data-modo="enlace" role="tab">Cámara o enlace</button>
+    <button type="button" class="pestana" data-modo="archivo" role="tab">Video de mi PC</button>
+  </div>
   <form id="form-camara" class="formulario">
-    <label>Nombre<input name="nombre" placeholder="Pasillo principal" required></label>
-    <label>Fuente<input name="fuente" placeholder="0  ·  rtsp://usuario:clave@192.168.1.64:554/..." required></label>
-    <div class="ayuda">
-      <p><b>0</b>, <b>1</b>…: webcam de la laptop.</p>
-      <p><b>Hikvision:</b> <code>rtsp://usuario:clave@IP:554/Streaming/Channels/101</code></p>
-      <p><b>Dahua:</b> <code>rtsp://usuario:clave@IP:554/cam/realmonitor?channel=1&amp;subtype=0</code></p>
-      <p><b>Archivo:</b> ruta a un .mp4, que se reproduce en bucle.</p>
+    <label>Nombre<input name="nombre" placeholder="Pasillo principal"></label>
+    <div class="panel-modo" data-panel="enlace">
+      <label>Fuente o enlace<input name="fuente" placeholder="0  ·  rtsp://…  ·  https://…/video.mp4"></label>
+      <div class="ayuda">
+        <p><b>0</b>, <b>1</b>…: webcam de la laptop.</p>
+        <p><b>Hikvision:</b> <code>rtsp://usuario:clave@IP:554/Streaming/Channels/101</code></p>
+        <p><b>Dahua:</b> <code>rtsp://usuario:clave@IP:554/cam/realmonitor?channel=1&amp;subtype=0</code></p>
+        <p><b>Enlace:</b> dirección directa de un video (<code>…/video.mp4</code>), que se reproduce en bucle, o de una transmisión (<code>…/stream.m3u8</code>).</p>
+        <p><b>YouTube, Facebook o TikTok:</b> pegue el enlace y VigIA descarga el video (requiere yt-dlp; vea el README).
+          Úselo solo para pruebas internas: esas plataformas no permiten descargar sin permiso del autor.</p>
+      </div>
+      <div id="descarga" class="descarga" hidden>
+        <span id="descarga-texto">Preparando la descarga…</span>
+        <progress id="descarga-progreso" max="100" value="0"></progress>
+      </div>
     </div>
-    <div class="botones"><button class="btn primario" type="submit">Agregar</button></div>
+    <div class="panel-modo" data-panel="archivo" hidden>
+      <label class="soltar" id="soltar">
+        <input type="file" name="archivo" accept="video/*,.mp4,.avi,.mov,.mkv,.webm,.m4v" id="archivo-video">
+        <span id="soltar-texto">Arrastre un video aquí o haga clic para elegirlo<br><small>MP4, AVI, MOV, MKV o WEBM · hasta 2 GB</small></span>
+      </label>
+      <progress id="subida-progreso" max="100" value="0" hidden></progress>
+      <p class="nota">El video se copia a la carpeta <code>datos/videos</code> de este equipo (no sale a internet), se analiza en bucle y se borra al quitar la cámara.</p>
+    </div>
+    <div class="botones"><button class="btn primario" type="submit" id="btn-agregar">Agregar</button></div>
   </form>
 </dialog>
 
@@ -97,10 +132,14 @@
       <select id="zona-tipo">
         <option value="restringida">Restringida (alerta de intrusión)</option>
         <option value="merodeo">Merodeo (alerta por permanencia)</option>
+        <option value="protegida">Protegida (alerta de vandalismo)</option>
       </select>
     </label>
+    <label title="Deje vacío para vigilar todo el día">Activa de <input id="zona-desde" type="time"></label>
+    <label>a <input id="zona-hasta" type="time"></label>
   </div>
-  <p class="ayuda-linea">Haga clic sobre la imagen para marcar los vértices y doble clic para cerrar el polígono. Se evalúa la posición de los pies.</p>
+  <p class="ayuda-linea">Haga clic sobre la imagen para marcar los vértices y doble clic para cerrar el polígono. Se evalúa la posición de los pies.
+    Con horario (por ejemplo, 22:00 a 06:00), la zona solo alerta en esa franja; sin horario, todo el día.</p>
   <div class="lienzo-zonas">
     <img id="zona-fondo" alt="Imagen actual de la cámara">
     <canvas id="zona-lienzo"></canvas>
@@ -119,6 +158,7 @@
     <fieldset>
       <legend>Privacidad</legend>
       <label class="fila"><input type="checkbox" data-ruta="privacidad.difuminar_rostros"> Difuminar rostros</label>
+      <label class="fila"><input type="checkbox" data-ruta="privacidad.solo_esqueleto"> Solo esqueleto (borrar a las personas de la imagen)</label>
       <label class="fila"><input type="checkbox" data-ruta="privacidad.analizar_emociones"> Analizar expresiones faciales</label>
       <p class="nota">El reconocimiento de emociones es poco fiable y está restringido por la ley en algunos contextos
         (por ejemplo, en trabajo y educación en la Unión Europea). Úselo solo con consentimiento informado.</p>
@@ -134,7 +174,19 @@
       <label class="fila"><input type="checkbox" data-ruta="reglas.intrusion.activa"> Intrusión en zonas restringidas</label>
       <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.activa"> Objetos abandonados y posible hurto</label>
       <label class="num">Tiempo para considerar abandono (s)<input type="number" step="1" min="5" data-ruta="reglas.objetos.tiempo_abandono"></label>
+      <label class="fila"><input type="checkbox" data-ruta="reglas.vehiculos.activa"> Robo de vehículos estacionados</label>
+      <label class="fila"><input type="checkbox" data-ruta="reglas.huida.activa"> Robo con huida (tocar y salir corriendo)</label>
+      <label class="fila"><input type="checkbox" data-ruta="reglas.vandalismo.activa"> Vandalismo en vehículos y zonas protegidas</label>
+      <label class="fila"><input type="checkbox" data-ruta="reglas.armas.activa"> Posibles armas (cuchillo, bate)</label>
+      <label class="fila"><input type="checkbox" data-ruta="reglas.aglomeracion.activa"> Aglomeración y huida masiva</label>
+      <label class="num">Personas para aglomeración<input type="number" step="1" min="3" data-ruta="reglas.aglomeracion.max_personas"></label>
+      <label class="fila"><input type="checkbox" data-ruta="reglas.violencia.requiere_contacto"> Violencia: exigir contacto físico</label>
       <label class="fila"><input type="checkbox" data-ruta="reglas.emociones.alerta_enojo_miedo"> Alertar enojo o miedo sostenidos</label>
+    </fieldset>
+    <fieldset>
+      <legend>Búsqueda con CLIP</legend>
+      <label class="fila"><input type="checkbox" data-ruta="busqueda.activa"> Activar la búsqueda de capturas en lenguaje natural</label>
+      <p class="nota">Requiere <code>pip install -r requirements-busqueda.txt</code>. La primera vez descarga el modelo (~1.5 GB).</p>
     </fieldset>
     <div class="botones"><button class="btn primario" type="submit">Guardar</button></div>
   </form>

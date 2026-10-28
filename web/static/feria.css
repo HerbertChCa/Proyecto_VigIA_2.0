@@ -1,0 +1,114 @@
+/* Páginas de la feria: reto (pantalla del stand), encuesta (celular) y resultados en vivo. */
+a.btn { text-decoration: none; display: inline-flex; align-items: center; }
+.btn.grande { font-size: 18px; padding: 12px 26px; border-radius: 10px; }
+.btn[aria-pressed="true"] { background: rgba(63, 182, 168, .18); border-color: var(--acento); color: var(--acento); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.selector { display: flex; gap: 6px; align-items: center; color: var(--tenue); font-size: 13px; }
+.selector select { background: var(--panel-2); border: 1px solid var(--borde); border-radius: 8px; padding: 6px 8px; }
+
+/* ---------- reto */
+.reto-contenido { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 18px; padding: 18px 20px; }
+.escenario { display: grid; gap: 14px; align-content: start; }
+.pantalla { position: relative; background: #000; border: 1px solid var(--borde); border-radius: 14px; overflow: hidden;
+  aspect-ratio: 16 / 9; }
+.pantalla img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.capa { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: 10px;
+  background: rgba(8, 10, 13, .55); padding: 24px; }
+.capa[hidden] { display: none; }
+.capa-grande { font-size: clamp(40px, 6.5vw, 96px); font-weight: 800; line-height: 1; letter-spacing: -1px; }
+.capa-texto { font-size: clamp(16px, 1.8vw, 22px); max-width: 760px; margin: 0 auto; color: #e9edf2; }
+.capa.detectado { background: rgba(63, 182, 168, .30); }
+.capa.detectado .capa-grande { color: #7ff0e1; }
+.capa.escapo { background: rgba(227, 163, 58, .28); }
+.capa.escapo .capa-grande { color: #ffd38a; }
+.capa .explicacion { font-size: 15px; color: #cfd6de; }
+.barra-tiempo { position: absolute; left: 0; right: 0; bottom: 0; height: 8px; background: rgba(255, 255, 255, .12); }
+.barra-tiempo[hidden] { display: none; }
+.barra-tiempo i { display: block; height: 100%; width: 100%; background: var(--acento); transition: width .2s linear; }
+.consigna { background: var(--panel); border: 1px solid var(--borde); border-radius: 14px; padding: 18px 20px;
+  display: grid; grid-template-columns: 1fr auto; gap: 6px 18px; align-items: center; }
+.consigna h2 { margin: 0; font-size: 24px; }
+.consigna p { margin: 0; color: var(--tenue); font-size: 16px; grid-column: 1; }
+.consigna-botones { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 8px; }
+
+.lateral { display: grid; gap: 12px; align-content: start; }
+.lateral .titulo-seccion { margin: 0; }
+.retos { display: grid; gap: 8px; }
+.reto-tarjeta { text-align: left; background: var(--panel); border: 1px solid var(--borde); border-radius: 12px;
+  padding: 11px 14px; cursor: pointer; display: grid; gap: 3px; }
+.reto-tarjeta:hover { border-color: #3a4350; }
+.reto-tarjeta.elegido { border-color: var(--acento); background: rgba(63, 182, 168, .08); }
+.reto-tarjeta b { font-size: 15px; }
+.reto-tarjeta small { color: var(--tenue); }
+.reto-tarjeta .falta { color: var(--media); }
+.reto-tarjeta.bloqueado { opacity: .6; }
+.global { background: var(--panel); border: 1px solid var(--borde); border-radius: 12px; padding: 12px 14px; font-size: 14px; }
+.global b { font-size: 26px; display: block; }
+.qr-encuesta { display: grid; grid-template-columns: 120px 1fr; gap: 12px; background: #fff; color: #111;
+  border-radius: 12px; padding: 12px; align-items: center; }
+.qr-encuesta img { width: 120px; height: 120px; image-rendering: pixelated; }
+.qr-encuesta p { margin: 4px 0; font-size: 13px; color: #333; }
+.qr-encuesta a { font-size: 13px; color: #0b6b60; }
+
+/* ---------- encuesta (celular) */
+.encuesta { max-width: 640px; margin: 0 auto; padding: 18px 16px 40px; }
+.encuesta h1 { font-size: 22px; margin: 6px 0; }
+.encuesta .intro { color: var(--tenue); }
+.pregunta { background: var(--panel); border: 1px solid var(--borde); border-radius: 12px; padding: 14px; margin: 12px 0; }
+.pregunta legend { padding: 0; font-weight: 600; margin-bottom: 8px; }
+.pregunta .bloque { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--acento); margin-bottom: 4px; }
+.opciones { display: grid; gap: 6px; }
+.opciones label { display: flex; gap: 10px; align-items: center; background: var(--panel-2); border: 1px solid var(--borde);
+  border-radius: 9px; padding: 10px 12px; cursor: pointer; }
+.opciones label:has(input:checked) { border-color: var(--acento); background: rgba(63, 182, 168, .10); }
+.opciones input { accent-color: var(--acento); width: 18px; height: 18px; }
+.escala { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; }
+.escala label { flex-direction: column; gap: 4px; padding: 8px 2px; text-align: center; font-size: 10.5px; line-height: 1.2; }
+.escala label b { font-size: 18px; }
+.encuesta .enviar { width: 100%; margin-top: 8px; }
+.mensaje { text-align: center; padding: 40px 10px; }
+.mensaje b { font-size: 22px; display: block; margin-bottom: 8px; }
+fieldset { border: 0; margin: 0; min-width: 0; }
+
+/* ---------- resultados en vivo */
+.resultados { padding: 18px 20px; display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 18px; }
+.res-lista { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); align-content: start; }
+.res-tarjeta { background: var(--panel); border: 1px solid var(--borde); border-radius: 12px; padding: 14px; }
+.res-tarjeta h3 { font-size: 14px; margin: 0 0 10px; font-weight: 600; }
+.res-tarjeta .bloque { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--acento); margin-bottom: 4px; }
+.fila-barra { display: grid; grid-template-columns: 150px 1fr 48px; gap: 8px; align-items: center; font-size: 12px; margin: 4px 0; }
+.fila-barra .pista { background: var(--panel-2); border-radius: 4px; height: 12px; overflow: hidden; }
+.fila-barra .pista i { display: block; height: 100%; background: var(--acento); border-radius: 4px; transition: width .4s; }
+.fila-barra span:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+.likert-pila { display: flex; height: 18px; border-radius: 5px; overflow: hidden; background: var(--panel-2); }
+.likert-pila i { display: block; height: 100%; transition: width .4s; }
+.acuerdo { display: flex; gap: 16px; align-items: baseline; margin-top: 8px; font-size: 13px; color: var(--tenue); }
+.acuerdo b { font-size: 26px; color: var(--texto); font-variant-numeric: tabular-nums; }
+.leyenda { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--tenue); margin-bottom: 4px; }
+.leyenda i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.res-lateral { display: grid; gap: 12px; align-content: start; }
+.res-lateral .total { background: var(--panel); border: 1px solid var(--borde); border-radius: 12px; padding: 14px; }
+.res-lateral .total b { font-size: 44px; display: block; line-height: 1.1; }
+.res-lateral .qr-grande { background: #fff; border-radius: 12px; padding: 12px; text-align: center; color: #111; font-size: 13px; }
+.res-lateral .qr-grande img { width: 100%; image-rendering: pixelated; }
+.aviso-red { background: rgba(227, 163, 58, .12); border: 1px solid rgba(227, 163, 58, .4); border-radius: 10px;
+  padding: 10px 12px; font-size: 13px; }
+
+@media (max-width: 1000px) {
+  .reto-contenido, .resultados { grid-template-columns: 1fr; }
+  .consigna { grid-template-columns: 1fr; }
+  .consigna-botones { grid-column: 1; grid-row: auto; }
+  .res-lista { grid-template-columns: 1fr; }
+  .fila-barra { grid-template-columns: 110px 1fr 44px; }
+}
+
+/* el título de cada pregunta dentro de su recuadro (los fieldset ponen el legend sobre el borde) */
+.pregunta legend { float: left; width: 100%; }
+.pregunta .opciones { clear: both; }
+.res-tarjeta .nota { color: var(--tenue); margin-top: 8px; }
+/* en celulares angostos la escala se muestra como lista, para que las etiquetas no se corten */
+@media (max-width: 520px) {
+  .escala { grid-template-columns: 1fr; gap: 6px; }
+  .escala label { flex-direction: row; text-align: left; font-size: 14px; padding: 9px 12px; gap: 10px; }
+  .escala label b { font-size: 15px; min-width: 14px; }
+}

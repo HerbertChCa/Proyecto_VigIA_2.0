@@ -24,7 +24,9 @@ from .tipos import Evento
 
 NOMBRES = {
     "violencia": "Violencia", "caida": "Caída", "en_suelo": "Persona en el suelo", "merodeo": "Merodeo",
-    "intrusion": "Intrusión", "abandono": "Objeto abandonado", "hurto": "Posible hurto", "emocion": "Emoción",
+    "intrusion": "Intrusión", "abandono": "Objeto abandonado", "hurto": "Posible hurto", "robo_vehiculo": "Robo de vehículo",
+    "robo_huida": "Robo con huida", "vandalismo": "Vandalismo", "arma": "Posible arma", "aglomeracion": "Aglomeración",
+    "estampida": "Huida masiva", "emocion": "Emoción",
 }
 VEREDICTOS = ("confirmada", "falsa")
 COLUMNAS = ["id", "fecha", "camara", "tipo", "severidad", "mensaje", "explicacion", "captura", "atendida", "veredicto"]
@@ -46,6 +48,7 @@ class GestorAlertas:
             self._db.execute("ALTER TABLE alertas ADD COLUMN veredicto TEXT")
         self._db.commit()
         self._suscriptores: list[tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = []
+        self.al_guardar = None           # función que recibe el nombre de cada captura nueva (búsqueda CLIP)
 
     # ---- suscripción del panel (Server-Sent Events)
     def suscribir(self) -> asyncio.Queue:
@@ -84,6 +87,8 @@ class GestorAlertas:
             x1, y1, x2, y2 = (int(v) for v in c)
             cv2.rectangle(img, (x1, y1), (x2, y2), (40, 40, 230), 3)
         cv2.imwrite(str(self.carpeta / "capturas" / nombre), img, [cv2.IMWRITE_JPEG_QUALITY, 82])
+        if self.al_guardar:
+            self.al_guardar(nombre)
         with self._lock:
             cur = self._db.execute(
                 "INSERT INTO alertas (fecha, camara, tipo, severidad, mensaje, explicacion, captura) VALUES (?,?,?,?,?,?,?)",
@@ -108,6 +113,21 @@ class GestorAlertas:
         out = [dict(zip(COLUMNAS, f)) for f in filas]
         for a in out:
             a["tipo_nombre"] = NOMBRES.get(a["tipo"], a["tipo"])
+        return out
+
+    def por_capturas(self, nombres: list[str]) -> dict[str, dict]:
+        """Alertas a las que pertenecen unas capturas (para mostrar los resultados de la búsqueda)."""
+        if not nombres:
+            return {}
+        marcas = ",".join("?" * len(nombres))
+        with self._lock:
+            filas = self._db.execute(f"SELECT {', '.join(COLUMNAS)} FROM alertas WHERE captura IN ({marcas})",
+                                     nombres).fetchall()
+        out = {}
+        for f in filas:
+            a = dict(zip(COLUMNAS, f))
+            a["tipo_nombre"] = NOMBRES.get(a["tipo"], a["tipo"])
+            out[a["captura"]] = a
         return out
 
     def atender(self, aid: int) -> None:

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VigIA · Reto</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/feria.css">
+</head>
+<body class="reto">
+<header class="barra">
+  <div class="marca">
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg>
+    </span>
+    <div>
+      <h1>Reto VigIA</h1>
+      <p>Actúa una situación de riesgo: ¿la inteligencia artificial te detecta?</p>
+    </div>
+  </div>
+  <nav class="acciones">
+    <label class="selector">Cámara <select id="camara"></select></label>
+    <button class="btn" id="btn-esqueleto" aria-pressed="false" title="Borra a las personas de la imagen y deja solo su esqueleto">Solo esqueleto</button>
+    <a class="btn" href="/" title="Panel del operador">Panel</a>
+  </nav>
+</header>
+
+<main class="reto-contenido">
+  <section class="escenario">
+    <div class="pantalla">
+      <img id="video" alt="Video en vivo de la cámara">
+      <div id="capa" class="capa" hidden>
+        <div id="capa-grande" class="capa-grande"></div>
+        <div id="capa-texto" class="capa-texto"></div>
+      </div>
+      <div class="barra-tiempo" id="barra-tiempo" hidden><i id="barra-relleno"></i></div>
+    </div>
+    <div class="consigna" id="consigna">
+      <h2 id="consigna-titulo">Elige un reto</h2>
+      <p id="consigna-texto">Toca un reto de la derecha y luego «¡Empezar!». VigIA analiza tu esqueleto en tiempo real.</p>
+      <div class="consigna-botones">
+        <button class="btn primario grande" id="btn-empezar" disabled>¡Empezar!</button>
+        <button class="btn grande" id="btn-cancelar" hidden>Cancelar</button>
+      </div>
+    </div>
+  </section>
+
+  <aside class="lateral">
+    <h2 class="titulo-seccion">Retos</h2>
+    <div id="retos" class="retos"></div>
+    <div class="global" id="global"></div>
+    <div class="qr-encuesta">
+      <img id="qr" alt="Código QR de la encuesta">
+      <div>
+        <b>¿Aceptarías estas cámaras en tu ciudad?</b>
+        <p>Escanea y responde la encuesta anónima (1 minuto). Los resultados forman parte de la investigación.</p>
+        <a href="/encuesta/resultados" target="_blank">Ver resultados en vivo</a>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<footer class="pie">
+  VigIA no reconoce quién eres: trabaja con los 17 puntos de tu esqueleto. Los rostros se pixelan y solo se guarda una
+  imagen cuando hay una alerta, que se borra a los pocos días. <a href="/aviso" target="_blank">Aviso de videovigilancia</a>.
+</footer>
+
+<script src="/static/reto.js"></script>
+</body>
+</html>

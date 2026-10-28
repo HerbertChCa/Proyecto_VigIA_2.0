@@ -1,0 +1,2 @@
+# Opcional: búsqueda de capturas con CLIP (botón «Buscar» del panel). Se instala además de requirements.txt.
+open_clip_torch>=2.24

@@ -28,7 +28,8 @@ def ruta_modelo(ruta: str) -> str:
         return str(p)
     return p.name
 
-CLASES_OBJETO = {24: "mochila", 26: "bolso", 28: "maleta"}
+CLASES_OBJETO = {24: "mochila", 26: "bolso", 28: "maleta", 1: "bicicleta", 2: "auto", 3: "motocicleta", 63: "laptop", 67: "celular",
+                 43: "cuchillo", 34: "bate"}
 
 
 class DetectorYOLO:

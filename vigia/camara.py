@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 
 from .alertas import GestorAlertas
-from .dibujo import cajas_cabeza, difuminar, dibujar
+from .dibujo import cajas_cabeza, difuminar, dibujar, solo_esqueleto
 from .historial import Historial
 from .reglas import Reglas
 from .tipos import Observacion
@@ -25,6 +25,7 @@ class Lector:
     def __init__(self, fuente):
         self.fuente = int(fuente) if str(fuente).isdigit() else str(fuente)
         self.es_archivo = isinstance(self.fuente, str) and not self.fuente.lower().startswith(("rtsp", "http"))
+        self.es_enlace = isinstance(self.fuente, str) and self.fuente.lower().startswith(("http://", "https://"))
         self.frame: Optional[np.ndarray] = None
         self.conectada = False
         self._parar = False
@@ -53,17 +54,22 @@ class Lector:
                 continue
             espera = 1.0
             fps_archivo = cap.get(cv2.CAP_PROP_FPS) or 25
+            if not 1 <= fps_archivo <= 120:
+                fps_archivo = 25
+            # un enlace a un archivo (.mp4) tiene duración: se reproduce a su velocidad y en bucle, como un archivo local;
+            # una transmisión en vivo (.m3u8, RTSP) no tiene número de frames
+            finito = self.es_archivo or (self.es_enlace and (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) > 0)
             while not self._parar:
                 ok, f = cap.read()
                 if not ok:
                     if self.es_archivo:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                         continue
-                    break
+                    break                       # enlace terminado o caído: se vuelve a abrir (bucle)
                 with self._lock:
                     self.frame = f
                 self.conectada = True
-                if self.es_archivo:
+                if finito:
                     time.sleep(1.0 / fps_archivo)
             cap.release()
             self.conectada = False
@@ -173,15 +179,20 @@ class Trabajador:
                 if est and "emo_etiqueta" in est.estado:
                     emociones[p.id] = est.estado["emo_etiqueta"]
 
+        esqueleto = bool(priv.get("solo_esqueleto"))
         if priv["difuminar_rostros"]:
             difuminar(frame, cajas_cabeza(obs))
+        if esqueleto:
+            solo_esqueleto(frame, obs)
         self.crudo = frame.copy()
         self._tiempos.append(ahora)
         fps = (len(self._tiempos) - 1) / (self._tiempos[-1] - self._tiempos[0]) if len(self._tiempos) > 1 else 0.0
         enc = f"{self.nombre}  |  {time.strftime('%H:%M:%S')}  |  {fps:.1f} fps  |  {len(obs.personas)} personas"
         if self.demo:
             enc += "  |  MODO DEMO (escena simulada)"
-        dibujar(frame, obs, self.zonas, en_alerta, emociones, enc)
+        if esqueleto:
+            enc += "  |  SOLO ESQUELETO"
+        dibujar(frame, obs, self.zonas, en_alerta, emociones, enc, grueso=esqueleto)
         self.alertas.procesar(self.id, eventos, frame)
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
         if ok:

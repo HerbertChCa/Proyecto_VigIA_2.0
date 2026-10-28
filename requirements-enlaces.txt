@@ -1,0 +1,3 @@
+# Opcional: agregar cámaras con enlaces de YouTube, Facebook o TikTok (se descargan con yt-dlp).
+# Para YouTube instale además Deno, el intérprete de JavaScript que yt-dlp necesita:  winget install DenoLand.Deno
+yt-dlp[default]

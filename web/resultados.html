@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VigIA · Resultados de la encuesta</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/feria.css">
+</head>
+<body>
+<header class="barra">
+  <div class="marca">
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg>
+    </span>
+    <div>
+      <h1>¿Aceptarías cámaras inteligentes?</h1>
+      <p>Resultados en vivo de la encuesta de la feria, comparados con los estudios de la revisión sistemática</p>
+    </div>
+  </div>
+  <nav class="acciones" id="acciones-local">
+    <a class="btn" href="/api/encuesta.csv" id="btn-csv">Exportar CSV</a>
+    <a class="btn" href="/reto">Reto</a>
+  </nav>
+</header>
+<main class="resultados">
+  <section class="res-lista" id="lista"></section>
+  <aside class="res-lateral">
+    <div class="total"><b id="n">0</b>respuestas</div>
+    <div class="qr-grande" id="qr-caja">
+      <img src="/api/encuesta/qr.png" alt="Código QR de la encuesta" id="qr">
+      <div>Escanea para responder<br><code id="url"></code></div>
+    </div>
+    <div class="aviso-red" id="aviso-red" hidden>
+      Para que los celulares abran la encuesta, inicie VigIA con <code>--feria</code> y conecte los celulares a la
+      misma red Wi-Fi que esta PC.
+    </div>
+    <p class="nota">Las cifras de referencia vienen de estudios de otros países incluidos en la revisión; las preguntas
+      no son idénticas, así que la comparación es orientativa.</p>
+  </aside>
+</main>
+<script src="/static/resultados.js"></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VigIA · Encuesta</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/feria.css">
+</head>
+<body>
+<main class="encuesta">
+  <h1>¿Aceptarías cámaras inteligentes en tu ciudad?</h1>
+  <p class="intro">Encuesta anónima de la investigación <i>Reconocimiento del comportamiento humano en cámaras de
+    seguridad</i> (USMP, Arequipa). No pedimos tu nombre ni datos personales. Toma alrededor de un minuto.</p>
+
+  <div id="paso-edad" class="pregunta">
+    <fieldset>
+      <legend>¿Tienes 18 años o más?</legend>
+      <div class="opciones">
+        <label><input type="radio" name="mayor" value="si"> Sí, tengo 18 años o más</label>
+        <label><input type="radio" name="mayor" value="no"> No</label>
+      </div>
+    </fieldset>
+  </div>
+
+  <form id="form" hidden></form>
+  <div id="mensaje" class="mensaje" hidden></div>
+</main>
+<script src="/static/encuesta.js"></script>
+</body>
+</html>

@@ -1,6 +1,7 @@
 .venv/
 __pycache__/
 datos/
+videos/
 models/*.pt
 models/*.onnx
 resultados_rwf2000.csv

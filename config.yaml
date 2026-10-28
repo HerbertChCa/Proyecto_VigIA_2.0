@@ -11,13 +11,19 @@ servidor:
 #   rtsp://usuario:clave@IP:554/stream  -> cámara IP
 #   ruta a un .mp4       -> video grabado (se reproduce en bucle)
 camaras:
-  - id: cam1
-    nombre: Webcam laptop
-    fuente: 0
+  - id: video1
+    nombre: Prueba robo 1
+    fuente: videos/robo1.mp4
+  - id: video2
+    nombre: Prueba robo 2
+    fuente: videos/robo2.mp4
+  - id: video3
+    nombre: Prueba robo 3
+    fuente: videos/robo3.mp4
 
 modelos:
   pose: models/yolo11n-pose.pt       # personas + 17 puntos del esqueleto + seguimiento
-  objetos: models/yolo11n.pt         # mochilas, bolsos, maletas
+  objetos: models/yolo11n.pt         # mochilas, bolsos, maletas y vehículos
   tamano_imagen: 480           # menor = más rápido en CPU
   confianza: 0.40
   objetos_cada_n_frames: 3     # el detector de objetos corre 1 de cada N frames
@@ -30,6 +36,7 @@ procesamiento:
 
 privacidad:
   difuminar_rostros: true      # privacidad por diseño: activo por defecto
+  solo_esqueleto: false        # borra a las personas de la imagen y deja solo su esqueleto (también en las capturas)
   analizar_emociones: false    # opcional: el artículo (PE3) muestra menor aceptación de funciones intrusivas
   dias_retencion_capturas: 7
   # Aviso de videovigilancia (página /aviso). La aceptación depende de la finalidad declarada y de
@@ -44,6 +51,7 @@ reglas:
     velocidad_extremidades: 1.8   # alturas/s de muñecas, codos y tobillos respecto del torso
     distancia_max: 1.2            # distancia entre personas (alturas)
     duracion_min: 0.6             # segundos sostenidos
+    requiere_contacto: true       # una mano o un pie debe llegar al cuerpo de la otra persona
   caida:
     activa: true
     angulo_horizontal: 60         # grados del tronco respecto de la vertical
@@ -58,9 +66,36 @@ reglas:
     activa: true
     tiempo_abandono: 30           # segundos inmóvil sin su dueño cerca
     distancia_dueno: 2.5          # alturas
+  vehiculos:
+    activa: true                  # robo de motos, bicicletas y autos estacionados
+    tiempo_estacionado: 5         # segundos quieto para considerarlo estacionado
+    tiempo_manipulacion: 3        # segundos que alguien distinto del dueño debe estar sobre él
+    solape_min: 0.25              # fracción de la persona que debe quedar dentro del vehículo
+  huida:
+    activa: true                  # robo con huida: tocó a otra persona y salió corriendo
+    velocidad: 1.6                # alturas/s del cuerpo (caminar ~0.7, correr > 1.6)
+    ventana: 4                    # segundos después del contacto en que se vigila la huida
+  vandalismo:
+    activa: true                  # golpes contra un vehículo o una zona "protegida" sin nadie cerca
+  armas:
+    activa: true                  # cuchillo o bate en la mano (clases COCO del detector de objetos)
+    distancia_mano: 0.3           # alturas entre el objeto y la muñeca
+    detecciones_min: 2            # veces que debe verse en 2 s (evita errores de un frame)
+  aglomeracion:
+    activa: true
+    max_personas: 15              # personas en la cámara para avisar aglomeración
+    duracion: 5                   # segundos sostenidos
+    min_corriendo: 4              # huida masiva: al menos N personas corriendo (y la mitad del total)
   emociones:
     alerta_enojo_miedo: false     # alerta si el enojo o miedo se sostiene
     duracion_min: 4
+
+# Búsqueda de capturas en lenguaje natural con CLIP (opcional). Requiere: pip install -r requirements-busqueda.txt
+# La primera vez descarga el modelo (~1.5 GB). El modelo multilingüe entiende consultas en español.
+busqueda:
+  activa: false
+  modelo: xlm-roberta-base-ViT-B-32
+  pesos: laion5b_s13b_b90k
 
 alertas:
   enfriamiento: 30                # no repite la misma alerta de la misma persona antes de N s
