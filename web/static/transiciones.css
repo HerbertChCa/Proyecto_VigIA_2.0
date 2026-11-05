@@ -1,0 +1,48 @@
+/* Transiciones de VigIA, compartidas por todas las páginas.
+   1. Entre páginas: la nueva aparece barrida por una línea de escaneo, como una cámara que se enciende
+      (View Transitions entre documentos; en navegadores sin soporte la página simplemente carga).
+   2. Al llegar al panel o al reto: marcos de enfoque que se fijan sobre cada cámara. */
+
+@view-transition { navigation: auto; }
+
+@property --barrido { syntax: "<percentage>"; inherits: false; initial-value: 0%; }
+
+::view-transition-old(root) { animation: vt-salida .38s cubic-bezier(.4, 0, 1, 1) both; }
+::view-transition-new(root) {
+  animation: vt-entrada .7s cubic-bezier(.2, .7, .2, 1) both;
+  -webkit-mask-image: linear-gradient(180deg, #000 var(--barrido), rgba(0, 0, 0, .35) calc(var(--barrido) + 1.5%), transparent calc(var(--barrido) + 7%));
+  mask-image: linear-gradient(180deg, #000 var(--barrido), rgba(0, 0, 0, .35) calc(var(--barrido) + 1.5%), transparent calc(var(--barrido) + 7%));
+}
+@keyframes vt-salida { to { opacity: 0; transform: scale(.985); filter: blur(2px) saturate(.4); } }
+@keyframes vt-entrada { from { --barrido: -8%; } to { --barrido: 108%; } }
+
+/* la línea luminosa que acompaña al barrido (la agrega transiciones.js) */
+.linea-escaneo { position: fixed; left: 0; right: 0; top: 0; height: 2px; z-index: 9999; pointer-events: none;
+  background: #5fd3c4; box-shadow: 0 0 14px 3px rgba(95, 211, 196, .65), 0 0 60px 12px rgba(95, 211, 196, .18);
+  animation: linea-baja .7s cubic-bezier(.2, .7, .2, 1) both; }
+@keyframes linea-baja { from { transform: translateY(-4vh); opacity: 1; } 85% { opacity: 1; } to { transform: translateY(104vh); opacity: 0; } }
+
+/* marcos de enfoque sobre cada cámara al llegar a la página */
+.arrancando .camara, .arrancando .pantalla { position: relative; }
+.arrancando .camara::after, .arrancando .pantalla::after {
+  content: ""; position: absolute; inset: 6px; z-index: 4; pointer-events: none;
+  --c: #5fd3c4; --l: 22px; --g: 2px;
+  background:
+    linear-gradient(var(--c), var(--c)) top left / var(--l) var(--g), linear-gradient(var(--c), var(--c)) top left / var(--g) var(--l),
+    linear-gradient(var(--c), var(--c)) top right / var(--l) var(--g), linear-gradient(var(--c), var(--c)) top right / var(--g) var(--l),
+    linear-gradient(var(--c), var(--c)) bottom left / var(--l) var(--g), linear-gradient(var(--c), var(--c)) bottom left / var(--g) var(--l),
+    linear-gradient(var(--c), var(--c)) bottom right / var(--l) var(--g), linear-gradient(var(--c), var(--c)) bottom right / var(--g) var(--l);
+  background-repeat: no-repeat;
+  animation: enfoque 1.1s cubic-bezier(.2, .8, .2, 1) both;
+}
+@keyframes enfoque {
+  0% { inset: 38% 42%; opacity: 0; }
+  35% { opacity: 1; }
+  70% { inset: 6px; opacity: 1; }
+  100% { inset: 6px; opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
+  .linea-escaneo, .arrancando .camara::after, .arrancando .pantalla::after { display: none; }
+}

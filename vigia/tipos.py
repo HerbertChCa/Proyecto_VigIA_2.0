@@ -19,6 +19,34 @@ ESQUELETO = [
 EMOCIONES = ["enojo", "desagrado", "miedo", "alegría", "neutral", "tristeza", "sorpresa"]
 
 
+# Proporciones del cuerpo respecto de la estatura (tablas antropométricas de Drillis y Contini)
+_SEGMENTOS = [((5, 6), (11, 12), 0.29),   # hombros-caderas (tronco)
+              ((11,), (13,), 0.245), ((12,), (14,), 0.245),   # muslos
+              ((13,), (15,), 0.246), ((14,), (16,), 0.246),   # canillas
+              ((5,), (7,), 0.186), ((6,), (8,), 0.186),       # brazos
+              ((5,), (6,), 0.259)]                          # ancho de hombros
+
+
+def alto_estimado(caja, puntos=None, conf=None, conf_min: float = 0.3) -> float:
+    """Estatura en píxeles. Si la cámara corta a la persona (solo de la cintura para arriba o para abajo),
+    la caja mide la mitad; las partes del cuerpo que sí se ven permiten estimar la estatura completa."""
+    h = float(max(1.0, caja[3] - caja[1]))
+    if puntos is None:
+        return h
+    ok = lambda i: conf is None or conf[i] >= conf_min
+    est = []
+    for a, b, frac in _SEGMENTOS:
+        if all(ok(i) for i in a + b):
+            pa = np.mean([puntos[i] for i in a], axis=0)
+            pb = np.mean([puntos[i] for i in b], axis=0)
+            est.append(float(np.linalg.norm(pa - pb)) / frac)
+    if not est:
+        return h
+    est.sort(reverse=True)
+    e = est[1] if len(est) > 1 else est[0]      # la segunda mayor: una parte mal detectada no la infla
+    return max(h, min(e, 2.5 * h))              # vista de lado o en escorzo, las partes solo se acortan
+
+
 @dataclass
 class Persona:
     id: int
@@ -26,10 +54,14 @@ class Persona:
     puntos: Optional[np.ndarray] = None   # (17, 2) en píxeles
     conf_puntos: Optional[np.ndarray] = None  # (17,)
     conf: float = 1.0
+    _alto: Optional[float] = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def alto(self) -> float:
-        return float(max(1.0, self.caja[3] - self.caja[1]))
+        """Altura de la persona entera, aunque la cámara solo vea medio cuerpo (ver alto_estimado)."""
+        if self._alto is None:
+            self._alto = alto_estimado(self.caja, self.puntos, self.conf_puntos)
+        return self._alto
 
     @property
     def centro(self) -> np.ndarray:

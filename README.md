@@ -66,6 +66,16 @@ del operador y el aviso de videovigilancia.
    100 s donde aparecen todos los comportamientos. Sirve para probar y para exponer.
 3. **Con la webcam:** doble clic en `iniciar.bat`. La primera vez crea un entorno de Python, instala las dependencias
    y descarga los modelos; luego abre `http://127.0.0.1:8000`.
+
+   Esa dirección muestra la **entrada**: una escena animada donde personas dibujadas solo con su esqueleto
+   caminan frente a una cámara y una de ellas se cae, más un resumen del producto y del artículo. El panel del
+   operador está en `/panel`, los retos en `/reto` y la encuesta en `/encuesta/resultados`.
+
+   La primera vez en cada sesión, la entrada muestra un **arranque**: se dibuja el ojo de VigIA, se revisa cada parte
+   del sistema con datos reales (modelos, cámaras en línea, privacidad) y el ojo se abre sobre la escena; cualquier
+   tecla lo salta. Al pasar de una página a otra, la nueva aparece barrida por una línea de escaneo y, en el panel y
+   el reto, unos marcos de enfoque se fijan sobre cada cámara. Si Windows tiene activado «reducir animaciones», todo
+   esto se omite.
 4. **Cámara IP:** en el panel, **+ Cámara** y escriba la dirección RTSP. Ejemplos:
    - Hikvision: `rtsp://usuario:clave@192.168.1.64:554/Streaming/Channels/101`
    - Dahua: `rtsp://usuario:clave@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0`
@@ -142,6 +152,41 @@ escribiendo lo que se ve, en español o en inglés: «persona con mochila», «m
 línea futura del artículo (0 de 44 estudios usan modelos de visión-lenguaje). Solo indexa capturas de alertas, no
 video continuo; las capturas tomadas en modo solo esqueleto no muestran a las personas, así que la búsqueda solo
 ve la escena.
+
+## Menos falsas alarmas
+
+- **Escenario aprendido.** Solo puede quedar «abandonado» un objeto que alguien trajo: lo que se ve en los primeros
+  10 s, lo que aparece sin nadie al lado (prendas de un escaparate, un estante) o lo que ya estaba en ese lugar se
+  considera parte del escenario.
+- **El operador enseña.** Marcar como **Falsa alarma** una alerta de objeto abandonado, hurto o robo de vehículo hace
+  que ese objeto, en ese lugar de la imagen, no vuelva a alertar. Se guarda en `datos/ignorar.json`.
+- **Alertas agrupadas.** Si la misma situación (cámara, tipo y severidad) se repite en menos de 60 s mientras la
+  alerta sigue pendiente, se suma a ella con un contador «×N» en lugar de crear otra fila (`alertas.agrupar`).
+- **Merodeo sin zonas, opcional.** Medir el merodeo en toda la cámara cuando no hay zonas está apagado por defecto,
+  porque en una tienda o un pasillo cualquiera se queda más de un minuto. Se activa en Ajustes.
+
+## Evaluación con videos propios: todas las reglas
+
+`scripts/evaluar_videos.py` pasa videos etiquetados por el mismo flujo que una cámara y entrega, por regla,
+sensibilidad, precisión, F1 y especificidad con su intervalo de confianza del 95 %, el tiempo hasta la detección y
+las falsas alarmas por hora en escenas cotidianas. Organice los videos con una carpeta por tipo de alerta:
+
+```
+evaluacion/
+  caida/positivos/        caidas reales o actuadas
+  caida/normales/         parecidos sin caída: agacharse, sentarse
+  robo_vehiculo/positivos/
+  robo_vehiculo/normales/ el dueño que se sube a su moto
+  normales/               escenas cotidianas sin incidentes
+```
+
+```bat
+python scripts/evaluar_videos.py --datos evaluacion --operador datos/alertas.db
+```
+
+Escribe `ficha_videos.md`, lista para el informe, y `resultados_videos.csv` con el detalle de cada video. Con
+`--operador` agrega la precisión observada con los veredictos del panel (uso real). Con pocos videos por regla los
+intervalos son amplios: reporte siempre la cifra con su intervalo y el número de videos.
 
 ## Evaluación con RWF-2000
 

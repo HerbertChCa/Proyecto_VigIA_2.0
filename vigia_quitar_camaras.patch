@@ -1,0 +1,80 @@
+diff --git a/vigia/servidor.py b/vigia/servidor.py
+index cc95bf2..03fd7a2 100644
+--- a/vigia/servidor.py
++++ b/vigia/servidor.py
+@@ -114,7 +114,10 @@ class Sistema:
+         self.buscador = Buscador(datos / "capturas", datos / "indice_clip.npz")
+         self.alertas.al_guardar = self.buscador.agregar
+         self._iniciar_busqueda()
+-        camaras = list(self.cfg["camaras"])
++        # las cámaras de config.yaml que se quitaron desde el panel no vuelven al reiniciar
++        self._f_quitadas = datos / "camaras_quitadas.json"
++        quitadas = set(json.loads(self._f_quitadas.read_text(encoding="utf-8"))) if self._f_quitadas.exists() else set()
++        camaras = [c for c in self.cfg["camaras"] if c["id"] not in quitadas]
+         if self._f_camaras.exists():
+             camaras += json.loads(self._f_camaras.read_text(encoding="utf-8"))
+         if demo:
+@@ -149,17 +152,27 @@ class Sistema:
+             extra.append(cam)
+             self._f_camaras.write_text(json.dumps(extra, ensure_ascii=False, indent=2), encoding="utf-8")
+ 
+-    def quitar_camara(self, cid: str) -> None:
++    def quitar_camara(self, cid: str) -> bool:
+         t = self.trabajadores.pop(cid, None)
+         if t:
+             t.detener()
+-            self._borrar_si_subido(t.fuente)
++            try:
++                self._borrar_si_subido(t.fuente)
++            except OSError:                              # el archivo se borrará a mano; la cámara ya se quitó
++                log.warning("No se pudo borrar el video de %s", cid)
+         if self._f_camaras.exists():
+             extra = [c for c in json.loads(self._f_camaras.read_text(encoding="utf-8")) if c["id"] != cid]
+             self._f_camaras.write_text(json.dumps(extra, ensure_ascii=False, indent=2), encoding="utf-8")
++        if any(c["id"] == cid for c in self.cfg["camaras"]):   # definida en config.yaml: se recuerda que se quitó
++            quitadas = set(json.loads(self._f_quitadas.read_text(encoding="utf-8"))) if self._f_quitadas.exists() else set()
++            quitadas.add(cid)
++            self._f_quitadas.write_text(json.dumps(sorted(quitadas)), encoding="utf-8")
++        return t is not None
+ 
+     def _borrar_si_subido(self, fuente) -> None:
+         """Un video subido desde el panel se borra al quitar su cámara (no se conservan grabaciones)."""
++        if isinstance(fuente, int) or "://" in str(fuente) or str(fuente).isdigit():
++            return                                       # webcam, celular o cámara IP: no hay archivo que borrar
+         ruta = Path(str(fuente))
+         if ruta.parent.resolve() != (self.datos / "videos").resolve():
+             return
+@@ -444,7 +457,8 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
+         return JSONResponse(d) if d else JSONResponse({"error": "descarga desconocida"}, status_code=404)
+ 
+     async def quitar(req: Request):
+-        sis.quitar_camara(req.path_params["cid"])
++        if not sis.quitar_camara(req.path_params["cid"]):
++            return JSONResponse({"error": "esa cámara ya no existe; recargue la página"}, status_code=404)
+         return JSONResponse({"ok": True})
+ 
+     async def ajustes(req: Request):
+diff --git a/web/static/app.js b/web/static/app.js
+index f244fda..f3fa3a3 100644
+--- a/web/static/app.js
++++ b/web/static/app.js
+@@ -44,7 +44,18 @@ function pintarCamaras() {
+       const cab = el("div", "camara-cab");
+       cab.append(el("h3", null, c.nombre), el("span", "meta"));
+       const quitar = el("button", "quitar", "✕"); quitar.title = "Quitar cámara";
+-      quitar.onclick = async () => { if (confirm(`¿Quitar la cámara «${c.nombre}»?`)) { await api(`/api/camaras/${c.id}`, { method: "DELETE" }); } };
++      quitar.onclick = async () => {
++        if (!confirm(`¿Quitar la cámara «${c.nombre}»?`)) return;
++        quitar.disabled = true;
++        try {
++          await api(`/api/camaras/${c.id}`, { method: "DELETE" });
++        } catch (e) {
++          if (!/ya no existe/.test(e.message)) { quitar.disabled = false; alert(`No se pudo quitar la cámara: ${e.message}`); return; }
++        }
++        // sin esperar al siguiente estado del servidor: si la conexión en vivo está caída, la tarjeta igual desaparece
++        estado.camaras = estado.camaras.filter((x) => x.id !== c.id);
++        tarjeta.remove();
++      };
+       cab.append(quitar);
+       const video = el("div", "video");
+       const img = el("img"); img.alt = `Video de ${c.nombre}`; img.src = `/video/${c.id}?t=${Date.now()}`;

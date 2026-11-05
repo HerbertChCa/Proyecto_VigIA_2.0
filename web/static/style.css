@@ -22,7 +22,7 @@ button, input, select { font: inherit; color: inherit; }
 /* ---------- barra superior */
 .barra { display: flex; align-items: center; gap: 24px; padding: 12px 20px;
   background: var(--panel); border-bottom: 1px solid var(--borde); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
-.marca { display: flex; gap: 10px; align-items: center; }
+.marca { display: flex; gap: 10px; align-items: center; color: inherit; text-decoration: none; }
 .logo { width: 36px; height: 36px; border-radius: 9px; display: grid; place-items: center;
   background: rgba(63, 182, 168, .14); color: var(--acento); }
 .marca h1 { margin: 0; font-size: 18px; letter-spacing: .3px; }
@@ -130,6 +130,7 @@ legend { color: var(--texto); padding: 0 6px; font-weight: 600; }
 
 .zonas-barra { display: flex; gap: 12px; flex-wrap: wrap; padding: 12px 16px 0; }
 .zonas-barra label { display: flex; gap: 6px; align-items: center; color: var(--tenue); font-size: 13px; }
+.clases-objeto { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; margin-bottom: 6px; }
 .ayuda-linea { color: var(--tenue); font-size: 12px; margin: 8px 16px; }
 .lienzo-zonas { position: relative; margin: 0 16px; background: #000; aspect-ratio: 16 / 9; }
 .lienzo-zonas img, .lienzo-zonas canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; }
@@ -172,3 +173,5 @@ legend { color: var(--texto); padding: 0 6px; font-weight: 600; }
 .descarga { display: grid; gap: 6px; font-size: 13px; color: var(--tenue); }
 .descarga[hidden] { display: none; }
 .descarga progress { width: 100%; height: 10px; }
+.alerta .veces { margin-left: 6px; padding: 0 6px; border-radius: 999px; background: rgba(229, 83, 75, .18); color: #ff9b94;
+  font-size: 11px; letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }

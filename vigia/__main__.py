@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
+import os
 import threading
 import webbrowser
 from pathlib import Path
@@ -10,7 +12,14 @@ from pathlib import Path
 import uvicorn
 import yaml
 
-from .servidor import RAIZ, crear_app, ip_local
+# PyTorch y OpenCV usan por defecto todos los núcleos en cada inferencia; con varias cámaras eso satura la CPU
+# y el panel se congela. Se deja libre un núcleo para el servidor web y el navegador. Debe fijarse antes de
+# importar torch (lo importa ultralytics al cargar los modelos).
+HILOS = max(1, (os.cpu_count() or 2) - 1)
+for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+    os.environ.setdefault(_var, str(HILOS))
+
+from .servidor import RAIZ, crear_app, ip_local  # noqa: E402
 
 
 def main():
@@ -35,7 +44,18 @@ def main():
     if not a.sin_navegador:
         local = "127.0.0.1" if host == "0.0.0.0" else host
         threading.Timer(2.0, lambda: webbrowser.open(f"http://{local}:{puerto}" + ("/reto" if a.feria else ""))).start()
-    uvicorn.run(app, host=host, port=puerto, log_level="warning")
+    # al cerrar con el navegador abierto, uvicorn cancela esas conexiones: no es un error que deba mostrarse
+    logging.getLogger("uvicorn.error").addFilter(
+        lambda r: not ((r.exc_info and r.exc_info[0] is asyncio.CancelledError) or "graceful shutdown" in r.getMessage()))
+    print("VigIA en marcha. Para cerrarlo pulse Ctrl+C (si no responde, púlselo otra vez).")
+    # el video en vivo y los eventos son conexiones que no terminan solas: sin un límite, Ctrl+C esperaría
+    # a que el navegador las cierre y la terminal quedaría colgada
+    try:
+        uvicorn.run(app, host=host, port=puerto, log_level="warning", timeout_graceful_shutdown=2)
+    except KeyboardInterrupt:       # uvicorn >= 0.29 vuelve a lanzar el Ctrl+C después de cerrar el servidor
+        pass
+    print("VigIA detenido.")
+    os._exit(0)     # corta los hilos de las cámaras que sigan esperando a una transmisión caída
 
 
 if __name__ == "__main__":

@@ -6,3 +6,6 @@ models/*.pt
 models/*.onnx
 resultados_rwf2000.csv
 ficha_evaluacion.md
+resultados_videos.csv
+ficha_videos.md
+evaluacion/

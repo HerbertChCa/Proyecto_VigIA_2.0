@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VigIA</title>
+  <meta name="description" content="VigIA reconoce situaciones de riesgo en cámaras de seguridad a partir de la postura del cuerpo, sin identificar a las personas.">
+  <link rel="stylesheet" href="/static/inicio.css">
+  <link rel="stylesheet" href="/static/transiciones.css">
+  <script src="/static/transiciones.js"></script>
+</head>
+<body>
+<div class="arranque" id="arranque" hidden aria-hidden="true">
+  <div class="arranque-centro">
+    <svg class="arranque-ojo" viewBox="0 0 24 24" width="96" height="96"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3.2"/></svg>
+    <p class="arranque-marca">VigIA</p>
+    <ol class="arranque-lineas" id="arranque-lineas"></ol>
+  </div>
+  <p class="arranque-saltar">Pulsa cualquier tecla o toca la pantalla para entrar</p>
+</div>
+<header class="cabecera">
+  <a class="marca" href="/" aria-label="VigIA, inicio">
+    <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg>
+    <span>VigIA</span>
+  </a>
+  <nav class="menu" aria-label="Secciones">
+    <a href="/panel">Panel</a>
+    <a href="/reto">Reto</a>
+    <a href="/encuesta/resultados">Encuesta</a>
+    <a href="/aviso">Aviso</a>
+  </nav>
+</header>
+
+<main>
+  <section class="portada" id="portada">
+    <canvas id="escena" aria-label="Escena animada: personas representadas solo por su esqueleto caminan frente a una cámara; una se cae y VigIA marca la caída con la medida que la detectó." role="img"></canvas>
+    <div class="portada-texto">
+      <h1>Ve lo que pasa,<br>no quién eres.</h1>
+      <p class="bajada">VigIA analiza cámaras de seguridad en tiempo real y avisa cuando alguien se cae, pelea, roba o entra donde no debe.
+        Trabaja con los 17 puntos del cuerpo de cada persona: nunca con su identidad.</p>
+      <div class="acciones">
+        <a class="boton principal" href="/panel">Abrir el panel</a>
+        <a class="boton" href="/reto">Jugar el reto</a>
+        <a class="boton" href="/encuesta/resultados">Ver la encuesta</a>
+      </div>
+    </div>
+    <p class="en-vivo" id="en-vivo" hidden></p>
+  </section>
+
+  <section class="bloque proceso" aria-labelledby="t-proceso">
+    <h2 id="t-proceso">Cómo decide una alerta</h2>
+    <ol class="pasos">
+      <li><b>La cámara envía la imagen.</b> Una webcam, una cámara IP o un video, analizados en tu propia PC.</li>
+      <li><b>Se marcan 17 puntos del cuerpo.</b> YOLO11 encuentra a cada persona, dibuja su esqueleto y la sigue entre cuadros.</li>
+      <li><b>Reglas que se pueden medir.</b> Velocidad de los brazos, ángulo del tronco, distancia entre personas y tiempo en una zona, comparados con umbrales.</li>
+      <li><b>Una persona tiene la última palabra.</b> La alerta llega con su captura y la medida que la disparó; el operador la confirma o la descarta.</li>
+    </ol>
+  </section>
+
+  <section class="bloque detecta" aria-labelledby="t-detecta">
+    <h2 id="t-detecta">Qué reconoce</h2>
+    <p class="situaciones">Peleas <i>/</i> caídas <i>/</i> personas en el suelo <i>/</i> intrusión <i>/</i> merodeo <i>/</i> objetos abandonados <i>/</i> hurto
+      <i>/</i> robo de vehículos <i>/</i> robo con huida <i>/</i> vandalismo <i>/</i> armas blancas <i>/</i> aglomeraciones <i>/</i> huidas masivas</p>
+    <p class="nota">Y, solo si se activa, expresiones faciales con fines informativos.</p>
+  </section>
+
+  <section class="bloque articulo" aria-labelledby="t-articulo">
+    <div class="articulo-intro">
+      <h2 id="t-articulo">Nace de una revisión de 48 estudios</h2>
+      <p>La revisión sistemática que da origen a VigIA encontró qué le falta a la videovigilancia inteligente.
+        Cada parte del producto responde a uno de esos vacíos.</p>
+    </div>
+    <dl class="vacios">
+      <div><dt>Solo 3 estudios muestran por qué alertan (Grad-CAM), y ninguno lo prueba con operadores.</dt>
+        <dd>Cada alerta dice qué medida la disparó, y el operador la confirma o la descarta.</dd></div>
+      <div><dt>Solo 6 de 44 estudios técnicos tratan la privacidad.</dt>
+        <dd>Rostros pixelados por defecto y un modo que borra a las personas y deja solo su esqueleto.</dd></div>
+      <div><dt>36 de 44 se preocupan por el tiempo real, pero solo 17 lo miden.</dt>
+        <dd>Modelos livianos que corren en una laptop, con los cuadros por segundo a la vista.</dd></div>
+      <div><dt>Solo 2 de 44 validan con datos de fuera del laboratorio.</dt>
+        <dd>Retos con visitantes reales y el veredicto del operador miden cuánto acierta en cada lugar.</dd></div>
+      <div><dt>Un solo estudio es latinoamericano.</dt>
+        <dd>Una encuesta de aceptación hecha en Arequipa, comparada en vivo con los estudios de otros países.</dd></div>
+      <div><dt>Ninguno de los 44 usa modelos de visión y lenguaje.</dt>
+        <dd>Las capturas se buscan escribiendo lo que se ve, con CLIP.</dd></div>
+    </dl>
+  </section>
+</main>
+
+<footer class="pie">
+  <p>Prototipo de investigación de la Universidad de San Martín de Porres, Filial Sur (Arequipa).</p>
+  <p class="cita">Basado en Choqqueccota Cahui, H. J. (2026). <i>Reconocimiento del comportamiento humano en cámaras de seguridad
+    mediante visión artificial y aprendizaje profundo: revisión sistemática de desafíos técnicos, percepción social y
+    tendencias (2021-2026)</i>.</p>
+</footer>
+
+<script src="/static/inicio.js"></script>
+</body>
+</html>

@@ -59,13 +59,24 @@ reglas:
     en_suelo_alerta: 5            # segundos tendido para alerta de "persona en el suelo"
   merodeo:
     activa: true
-    tiempo_max: 60                # segundos en la zona (o en cámara si no hay zonas)
+    tiempo_max: 60                # segundos en una zona de merodeo
+    sin_zonas: false              # si no hay zonas, medir en toda la cámara (genera muchas alertas en tiendas)
   intrusion:
     activa: true                  # se dispara al entrar en una zona "restringida"
   objetos:
     activa: true
     tiempo_abandono: 30           # segundos inmóvil sin su dueño cerca
     distancia_dueno: 2.5          # alturas
+    calentamiento: 10             # lo que se ve en los primeros N s es parte del escenario, no se abandona
+    clases:                       # objetos que se vigilan; en una tienda de ropa conviene apagar maleta y bolso
+      mochila: true
+      bolso: true
+      maleta: true
+      bicicleta: true
+      motocicleta: true
+      auto: true
+      cuchillo: true
+      bate: true
   vehiculos:
     activa: true                  # robo de motos, bicicletas y autos estacionados
     tiempo_estacionado: 5         # segundos quieto para considerarlo estacionado
@@ -99,3 +110,4 @@ busqueda:
 
 alertas:
   enfriamiento: 30                # no repite la misma alerta de la misma persona antes de N s
+  agrupar: 60                     # alertas del mismo tipo en la misma cámara dentro de N s se suman (×N) en una sola

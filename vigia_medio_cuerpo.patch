@@ -1,0 +1,162 @@
+diff --git a/pruebas/test_reglas.py b/pruebas/test_reglas.py
+index 9bb5124..adb53d6 100644
+--- a/pruebas/test_reglas.py
++++ b/pruebas/test_reglas.py
+@@ -952,3 +952,71 @@ class HurtoReal(unittest.TestCase):
+             reglas.evaluar(obs, hist, ANCHO, ALTO, [])
+             t += 0.1
+         self.assertEqual(hist.objetos[60].estado.get("dueno"), 1)
++
++
++def _recortar(p, modo):
++    """La cámara solo ve medio cuerpo: «piernas» (de la cintura para abajo) o «torso» (de la cintura para arriba)."""
++    from vigia.simulador import H
++    k, conf = p.puntos.copy(), np.full(17, 0.9)
++    vis = list(range(11, 17)) if modo == "piernas" else list(range(0, 13))
++    conf[[i for i in range(17) if i not in vis]] = 0.0
++    ys = k[vis, 1]
++    caja = p.caja.copy()
++    if modo == "piernas":
++        caja[1] = ys.min() - 0.05 * H
++    else:
++        caja[3] = ys.max() + 0.05 * H
++    return Persona(p.id, caja, k, conf)
++
++
++class MedioCuerpo(unittest.TestCase):
++    """Cámaras que solo ven a las personas de la cintura para arriba (mostrador) o para abajo (piso)."""
++
++    def escena(self, modo, bolsa, ladron):
++        from vigia.tipos import Objeto
++        from vigia.simulador import H
++        reglas, hist, eventos, t = Reglas(copy.deepcopy(CFG["reglas"])), Historial(), [], 0.0
++        alto_bolsa = bolsa[3] - bolsa[1]
++        xb = (bolsa[0] + bolsa[2]) / 2 + 0.55 * H      # se la deja y se la toma con el brazo estirado
++        while t < 26:
++            per, obj = [], []
++            if t < 12:
++                per.append(_persona(1, esqueleto(xb, 480, "quieto", t, 0, 1, 0)))
++            elif t < 16:
++                x = xb + (t - 12) * 100
++                per.append(_persona(1, esqueleto(x, 480, "camina", t, x, 1, 0)))
++                obj.append(Objeto(50, "mochila", bolsa))
++            elif t < 19.0:
++                x = 900 - (t - 16) * (900 - xb) / 3
++                per.append(_persona(2, esqueleto(x, 480, "camina", t, x, -1, 0)))
++                obj.append(Objeto(50, "mochila", bolsa))
++            else:
++                x = xb - max(0.0, t - 19.6) * 120
++                per.append(_persona(ladron, esqueleto(x, 480, "camina", t, x, -1, 0)))
++                if t >= 19.6:
++                    y = bolsa[1] - 60
++                    obj.append(Objeto(51, "mochila", np.array([x - 0.45 * H - 25, y, x - 0.45 * H + 25, y + alto_bolsa])))
++            obs = Observacion(t=t, personas=[_recortar(p, modo) for p in per], objetos=obj)
++            hist.actualizar(obs)
++            eventos += reglas.evaluar(obs, hist, ANCHO, ALTO, [])
++            t += 0.1
++        return [e for e in eventos if e.tipo == "hurto"]
++
++    def test_altura_estimada_con_medio_cuerpo(self):
++        from vigia.simulador import H
++        p = _persona(1, esqueleto(300, 480, "quieto", 0, 0, 1, 0))
++        for modo in ("piernas", "torso"):
++            m = _recortar(p, modo)
++            self.assertLess(m.caja[3] - m.caja[1], 0.7 * H)     # la caja mide medio cuerpo…
++            self.assertGreater(m.alto, 0.85 * H)                # …pero la estatura se recupera
++
++    def test_hurto_viendo_solo_las_piernas(self):
++        h = self.escena("piernas", np.array([280, 440, 330, 480.0]), ladron=2)
++        self.assertTrue(h and "#2" in h[0].mensaje)
++
++    def test_hurto_en_un_mostrador_viendo_solo_el_torso(self):
++        h = self.escena("torso", np.array([280, 330, 330, 370.0]), ladron=2)
++        self.assertTrue(h and "#2" in h[0].mensaje)
++
++    def test_el_dueno_recupera_su_mochila_viendo_medio_cuerpo(self):
++        self.assertEqual(self.escena("piernas", np.array([280, 440, 330, 480.0]), ladron=1), [])
+diff --git a/vigia/reglas.py b/vigia/reglas.py
+index e8e1001..19edac5 100644
+--- a/vigia/reglas.py
++++ b/vigia/reglas.py
+@@ -16,7 +16,7 @@ from .historial import Historial, Muestra, Pista
+ from .tipos import (CADERA_D, CADERA_I, CODO_D, CODO_I, EMOCIONES, HOMBRO_D, HOMBRO_I,
+                     MUNECA_D, MUNECA_I, NARIZ, OJO_D, OJO_I, OREJA_D, OREJA_I, RODILLA_D, RODILLA_I, TOBILLO_D,
+                     TOBILLO_I,
+-                    Evento, Observacion)
++                    Evento, Observacion, alto_estimado)
+ 
+ VEHICULOS = {"bicicleta", "auto", "motocicleta"}
+ PORTATILES = {"mochila", "bolso", "maleta", "laptop", "celular"}
+@@ -421,7 +421,7 @@ class Reglas:
+         for pista in hist.personas.values():
+             for m in pista.muestras:
+                 if desde <= m.t <= hasta:
+-                    alto = max(m.caja[3] - m.caja[1], 1.0)
++                    alto = alto_estimado(m.caja, m.puntos, m.conf_puntos)
+                     cx, cy = (m.caja[0] + m.caja[2]) / 2, (m.caja[1] + m.caja[3]) / 2
+                     d = float(np.hypot(cx - centro[0], cy - centro[1])) / alto
+                     if d <= limite and (mejor is None or d < mejor[0]):
+@@ -450,7 +450,7 @@ class Reglas:
+             quien = hist.personas.get(cerca[0])
+             if quien is not None and t - quien.ultima_vez < 0.5:
+                 m = quien.muestras[-1]
+-                alto = max(m.caja[3] - m.caja[1], 1.0)
++                alto = alto_estimado(m.caja, m.puntos, m.conf_puntos)
+                 lejos = np.hypot((m.caja[0] + m.caja[2]) / 2 - centro[0], (m.caja[1] + m.caja[3]) / 2 - centro[1]) / alto
+                 if lejos < 1.0:
+                     continue                        # sigue parado ahí (puede estar tapándolo): aún no se decide
+diff --git a/vigia/tipos.py b/vigia/tipos.py
+index 5d74ad4..f69e836 100644
+--- a/vigia/tipos.py
++++ b/vigia/tipos.py
+@@ -19,6 +19,34 @@ ESQUELETO = [
+ EMOCIONES = ["enojo", "desagrado", "miedo", "alegría", "neutral", "tristeza", "sorpresa"]
+ 
+ 
++# Proporciones del cuerpo respecto de la estatura (tablas antropométricas de Drillis y Contini)
++_SEGMENTOS = [((5, 6), (11, 12), 0.29),   # hombros-caderas (tronco)
++              ((11,), (13,), 0.245), ((12,), (14,), 0.245),   # muslos
++              ((13,), (15,), 0.246), ((14,), (16,), 0.246),   # canillas
++              ((5,), (7,), 0.186), ((6,), (8,), 0.186),       # brazos
++              ((5,), (6,), 0.259)]                          # ancho de hombros
++
++
++def alto_estimado(caja, puntos=None, conf=None, conf_min: float = 0.3) -> float:
++    """Estatura en píxeles. Si la cámara corta a la persona (solo de la cintura para arriba o para abajo),
++    la caja mide la mitad; las partes del cuerpo que sí se ven permiten estimar la estatura completa."""
++    h = float(max(1.0, caja[3] - caja[1]))
++    if puntos is None:
++        return h
++    ok = lambda i: conf is None or conf[i] >= conf_min
++    est = []
++    for a, b, frac in _SEGMENTOS:
++        if all(ok(i) for i in a + b):
++            pa = np.mean([puntos[i] for i in a], axis=0)
++            pb = np.mean([puntos[i] for i in b], axis=0)
++            est.append(float(np.linalg.norm(pa - pb)) / frac)
++    if not est:
++        return h
++    est.sort(reverse=True)
++    e = est[1] if len(est) > 1 else est[0]      # la segunda mayor: una parte mal detectada no la infla
++    return max(h, min(e, 2.5 * h))              # vista de lado o en escorzo, las partes solo se acortan
++
++
+ @dataclass
+ class Persona:
+     id: int
+@@ -26,10 +54,14 @@ class Persona:
+     puntos: Optional[np.ndarray] = None   # (17, 2) en píxeles
+     conf_puntos: Optional[np.ndarray] = None  # (17,)
+     conf: float = 1.0
++    _alto: Optional[float] = field(default=None, init=False, repr=False, compare=False)
+ 
+     @property
+     def alto(self) -> float:
+-        return float(max(1.0, self.caja[3] - self.caja[1]))
++        """Altura de la persona entera, aunque la cámara solo vea medio cuerpo (ver alto_estimado)."""
++        if self._alto is None:
++            self._alto = alto_estimado(self.caja, self.puntos, self.conf_puntos)
++        return self._alto
+ 
+     @property
+     def centro(self) -> np.ndarray:

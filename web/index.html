@@ -5,10 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VigIA · Panel de vigilancia</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/transiciones.css">
+  <script src="/static/transiciones.js"></script>
 </head>
 <body>
 <header class="barra">
-  <div class="marca">
+  <a class="marca" href="/" title="Página de entrada">
     <span class="logo" aria-hidden="true">
       <svg viewBox="0 0 24 24" width="22" height="22"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg>
     </span>
@@ -16,7 +18,7 @@
       <h1>VigIA</h1>
       <p>Análisis de comportamiento en cámaras de seguridad</p>
     </div>
-  </div>
+  </a>
   <div class="indicadores">
     <div class="indicador"><span id="ind-camaras">0</span><small>cámaras</small></div>
     <div class="indicador"><span id="ind-personas">0</span><small>personas</small></div>
@@ -99,6 +101,7 @@
       <label>Fuente o enlace<input name="fuente" placeholder="0  ·  rtsp://…  ·  https://…/video.mp4"></label>
       <div class="ayuda">
         <p><b>0</b>, <b>1</b>…: webcam de la laptop.</p>
+        <p><b>Celular:</b> con IP Webcam, <code>http://IP:8080/video</code>; con DroidCam, <code>http://IP:4747/video</code>. Celular y laptop en la misma red Wi-Fi.</p>
         <p><b>Hikvision:</b> <code>rtsp://usuario:clave@IP:554/Streaming/Channels/101</code></p>
         <p><b>Dahua:</b> <code>rtsp://usuario:clave@IP:554/cam/realmonitor?channel=1&amp;subtype=0</code></p>
         <p><b>Enlace:</b> dirección directa de un video (<code>…/video.mp4</code>), que se reproduce en bucle, o de una transmisión (<code>…/stream.m3u8</code>).</p>
@@ -171,9 +174,21 @@
       <label class="num">Alerta «en el suelo» tras (s)<input type="number" step="1" min="1" data-ruta="reglas.caida.en_suelo_alerta"></label>
       <label class="fila"><input type="checkbox" data-ruta="reglas.merodeo.activa"> Merodeo</label>
       <label class="num">Tiempo máximo en zona (s)<input type="number" step="1" min="5" data-ruta="reglas.merodeo.tiempo_max"></label>
+      <label class="fila"><input type="checkbox" data-ruta="reglas.merodeo.sin_zonas"> Merodeo en toda la cámara cuando no hay zonas</label>
       <label class="fila"><input type="checkbox" data-ruta="reglas.intrusion.activa"> Intrusión en zonas restringidas</label>
       <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.activa"> Objetos abandonados y posible hurto</label>
       <label class="num">Tiempo para considerar abandono (s)<input type="number" step="1" min="5" data-ruta="reglas.objetos.tiempo_abandono"></label>
+      <p class="ayuda">Objetos que se vigilan en todas las cámaras (apague los que el detector confunda con lo que hay en el lugar; por ejemplo, en una tienda de ropa, «maleta» y «bolso»):</p>
+      <div class="clases-objeto">
+        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.mochila"> Mochila</label>
+        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.bolso"> Bolso</label>
+        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.maleta"> Maleta</label>
+        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.bicicleta"> Bicicleta</label>
+        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.motocicleta"> Motocicleta</label>
+        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.auto"> Auto</label>
+        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.cuchillo"> Cuchillo</label>
+        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.bate"> Bate</label>
+      </div>
       <label class="fila"><input type="checkbox" data-ruta="reglas.vehiculos.activa"> Robo de vehículos estacionados</label>
       <label class="fila"><input type="checkbox" data-ruta="reglas.huida.activa"> Robo con huida (tocar y salir corriendo)</label>
       <label class="fila"><input type="checkbox" data-ruta="reglas.vandalismo.activa"> Vandalismo en vehículos y zonas protegidas</label>

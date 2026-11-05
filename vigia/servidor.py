@@ -35,6 +35,16 @@ MAX_SUBIDA = 2 * 1024 ** 3                       # 2 GB por video
 HORA = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")   # HH:MM de 00:00 a 23:59
 
 log = logging.getLogger("vigia.servidor")
+
+# Apps que convierten el celular en cámara: muestran en pantalla la dirección base, pero el video está en /video
+# y sin cifrar (la variante https usa un certificado propio que OpenCV no acepta).
+_CELULAR = re.compile(r"^https?://([^/:]+(?::[^/@]*@)?[^/:]*):(8080|4747)/?$", re.I)
+
+
+def normalizar_celular(fuente: str) -> str:
+    """http(s)://IP:8080 (IP Webcam) o http(s)://IP:4747 (DroidCam) -> http://IP:puerto/video"""
+    m = _CELULAR.match(fuente.strip())
+    return f"http://{m.group(1)}:{m.group(2)}/video" if m else fuente
 RAIZ = Path(__file__).resolve().parent.parent
 WEB = RAIZ / "web"
 
@@ -102,7 +112,11 @@ class Sistema:
                 regla, clave = ruta.split(".")
                 self.cfg["reglas"][regla][clave] = valor
             self.cfg["alertas"]["enfriamiento"] = 5
-        self.alertas = GestorAlertas(datos, self.cfg["alertas"]["enfriamiento"])
+        self.alertas = GestorAlertas(datos, self.cfg["alertas"]["enfriamiento"], self.cfg["alertas"].get("agrupar", 0))
+        self._f_ignorar = datos / "ignorar.json"
+        self.ignorados: dict[str, list] = (json.loads(self._f_ignorar.read_text(encoding="utf-8"))
+                                           if self._f_ignorar.exists() else {})
+        self.alertas.al_descartar = self._descartar
         self.alertas.limpiar_antiguas(self.cfg["privacidad"]["dias_retencion_capturas"])
         self.descargas = Descargas(datos / "videos")
         self.encuesta = Encuesta(datos)
@@ -110,7 +124,10 @@ class Sistema:
         self.buscador = Buscador(datos / "capturas", datos / "indice_clip.npz")
         self.alertas.al_guardar = self.buscador.agregar
         self._iniciar_busqueda()
-        camaras = list(self.cfg["camaras"])
+        # las cámaras de config.yaml que se quitaron desde el panel no vuelven al reiniciar
+        self._f_quitadas = datos / "camaras_quitadas.json"
+        quitadas = set(json.loads(self._f_quitadas.read_text(encoding="utf-8"))) if self._f_quitadas.exists() else set()
+        camaras = [c for c in self.cfg["camaras"] if c["id"] not in quitadas]
         if self._f_camaras.exists():
             camaras += json.loads(self._f_camaras.read_text(encoding="utf-8"))
         if demo:
@@ -125,26 +142,49 @@ class Sistema:
         for cam in camaras:
             self.agregar_camara(cam, guardar=False)
 
+    def _descartar(self, camara: str, tipo: str, cajas: list) -> None:
+        """Falsa alarma de un objeto o vehículo: ese lugar de la imagen deja de alertar (y se recuerda)."""
+        if tipo not in ("abandono", "hurto", "robo_vehiculo") or not cajas:
+            return
+        t = self.trabajadores.get(camara)
+        if t:
+            t.reglas.aprender_ignorar(cajas[0])
+            self.ignorados[camara] = t.reglas.ignorar
+            self._f_ignorar.write_text(json.dumps(self.ignorados, indent=1), encoding="utf-8")
+
     def agregar_camara(self, cam: dict, guardar: bool = True) -> None:
+        if isinstance(cam.get("fuente"), str):        # también corrige las ya guardadas con https://IP:8080
+            cam = {**cam, "fuente": normalizar_celular(cam["fuente"])}
         self.zonas.setdefault(cam["id"], [])
         self.trabajadores[cam["id"]] = Trabajador(cam, self.cfg, self.alertas, self.zonas[cam["id"]],
                                                   demo=str(cam["fuente"]) == "demo")
+        self.trabajadores[cam["id"]].reglas.ignorar = list(self.ignorados.get(cam["id"], []))
         if guardar:
             extra = json.loads(self._f_camaras.read_text(encoding="utf-8")) if self._f_camaras.exists() else []
             extra.append(cam)
             self._f_camaras.write_text(json.dumps(extra, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def quitar_camara(self, cid: str) -> None:
+    def quitar_camara(self, cid: str) -> bool:
         t = self.trabajadores.pop(cid, None)
         if t:
             t.detener()
-            self._borrar_si_subido(t.fuente)
+            try:
+                self._borrar_si_subido(t.fuente)
+            except OSError:                              # el archivo se borrará a mano; la cámara ya se quitó
+                log.warning("No se pudo borrar el video de %s", cid)
         if self._f_camaras.exists():
             extra = [c for c in json.loads(self._f_camaras.read_text(encoding="utf-8")) if c["id"] != cid]
             self._f_camaras.write_text(json.dumps(extra, ensure_ascii=False, indent=2), encoding="utf-8")
+        if any(c["id"] == cid for c in self.cfg["camaras"]):   # definida en config.yaml: se recuerda que se quitó
+            quitadas = set(json.loads(self._f_quitadas.read_text(encoding="utf-8"))) if self._f_quitadas.exists() else set()
+            quitadas.add(cid)
+            self._f_quitadas.write_text(json.dumps(sorted(quitadas)), encoding="utf-8")
+        return t is not None
 
     def _borrar_si_subido(self, fuente) -> None:
         """Un video subido desde el panel se borra al quitar su cámara (no se conservan grabaciones)."""
+        if isinstance(fuente, int) or "://" in str(fuente) or str(fuente).isdigit():
+            return                                       # webcam, celular o cámara IP: no hay archivo que borrar
         ruta = Path(str(fuente))
         if ruta.parent.resolve() != (self.datos / "videos").resolve():
             return
@@ -303,6 +343,7 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
             fuente = str(c.get("fuente", "")).strip()
             if not fuente:
                 return JSONResponse({"error": "Indica la fuente"}, status_code=400)
+            fuente = normalizar_celular(fuente)
             if PAGINAS_DE_VIDEO.search(fuente):
                 # una página (YouTube, Facebook, TikTok…) no es un video: se descarga con yt-dlp y se agrega al terminar
                 if not descargas_disponibles():
@@ -429,7 +470,8 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
         return JSONResponse(d) if d else JSONResponse({"error": "descarga desconocida"}, status_code=404)
 
     async def quitar(req: Request):
-        sis.quitar_camara(req.path_params["cid"])
+        if not sis.quitar_camara(req.path_params["cid"]):
+            return JSONResponse({"error": "esa cámara ya no existe; recargue la página"}, status_code=404)
         return JSONResponse({"ok": True})
 
     async def ajustes(req: Request):
@@ -438,7 +480,8 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
         return JSONResponse(sis.ajustes())
 
     rutas = [
-        Route("/", index),
+        Route("/", pagina("inicio.html")),
+        Route("/panel", index),
         Route("/video/{cid}", video),
         Route("/api/captura/{cid}", captura),
         Route("/api/eventos", eventos),

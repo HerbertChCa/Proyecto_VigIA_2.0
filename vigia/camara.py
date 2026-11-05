@@ -13,6 +13,7 @@ import numpy as np
 from .alertas import GestorAlertas
 from .dibujo import cajas_cabeza, difuminar, dibujar, solo_esqueleto
 from .historial import Historial
+from .objetos import FiltroObjetos
 from .reglas import Reglas
 from .tipos import Observacion
 
@@ -36,6 +37,13 @@ class Lector:
         if isinstance(self.fuente, int):
             cap = cv2.VideoCapture(self.fuente, cv2.CAP_DSHOW) if hasattr(cv2, "CAP_DSHOW") else cv2.VideoCapture(self.fuente)
             if not cap.isOpened():
+                cap = cv2.VideoCapture(self.fuente)
+        elif not self.es_archivo:
+            # celular (IP Webcam, DroidCam) o cámara IP: si no responde en 5 s se reintenta, en vez de esperar sin fin
+            try:
+                cap = cv2.VideoCapture(self.fuente, cv2.CAP_FFMPEG,
+                                       [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000])
+            except (cv2.error, TypeError, AttributeError):    # OpenCV anterior a 4.6
                 cap = cv2.VideoCapture(self.fuente)
         else:
             cap = cv2.VideoCapture(self.fuente)
@@ -92,6 +100,7 @@ class Trabajador:
         self.zonas = zonas
         self.demo = demo or str(self.fuente) == "demo"
         self.hist = Historial()
+        self.filtro = FiltroObjetos()
         self.reglas = Reglas(cfg["reglas"])
         self.jpeg: Optional[bytes] = None
         self.crudo: Optional[np.ndarray] = None   # último frame sin anotaciones (ya difuminado)
@@ -162,6 +171,8 @@ class Trabajador:
                 asignar_rostros(obs.rostros, obs.personas)
 
         h, w = frame.shape[:2]
+        if not self.demo:            # los objetos del modo demo ya vienen limpios
+            obs.objetos = self.filtro.filtrar(obs.objetos, t, self.cfg["reglas"]["objetos"])
         self.hist.actualizar(obs)
         eventos = self.reglas.evaluar(obs, self.hist, w, h, self.zonas)
         ahora = time.time()

@@ -125,7 +125,7 @@ function conectar() {
         const c = d.camaras.find((x) => x.id === camara());
         if (c && (c.emociones || {})[elegido.emocion] > 0) terminar(true);
       }
-    } else if (evento === "alerta" && fase === "curso" && elegido?.tipos && d.camara === camara() && elegido.tipos.includes(d.tipo)) {
+    } else if ((evento === "alerta" || evento === "repetida") && fase === "curso" && elegido?.tipos && d.camara === camara() && elegido.tipos.includes(d.tipo)) {
       terminar(true, d);
     }
   };

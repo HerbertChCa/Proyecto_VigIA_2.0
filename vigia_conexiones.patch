@@ -1,0 +1,75 @@
+diff --git a/vigia/servidor.py b/vigia/servidor.py
+index 03fd7a2..acb6131 100644
+--- a/vigia/servidor.py
++++ b/vigia/servidor.py
+@@ -35,6 +35,16 @@ MAX_SUBIDA = 2 * 1024 ** 3                       # 2 GB por video
+ HORA = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")   # HH:MM de 00:00 a 23:59
+ 
+ log = logging.getLogger("vigia.servidor")
++
++# Apps que convierten el celular en cámara: muestran en pantalla la dirección base, pero el video está en /video
++# y sin cifrar (la variante https usa un certificado propio que OpenCV no acepta).
++_CELULAR = re.compile(r"^https?://([^/:]+(?::[^/@]*@)?[^/:]*):(8080|4747)/?$", re.I)
++
++
++def normalizar_celular(fuente: str) -> str:
++    """http(s)://IP:8080 (IP Webcam) o http(s)://IP:4747 (DroidCam) -> http://IP:puerto/video"""
++    m = _CELULAR.match(fuente.strip())
++    return f"http://{m.group(1)}:{m.group(2)}/video" if m else fuente
+ RAIZ = Path(__file__).resolve().parent.parent
+ WEB = RAIZ / "web"
+ 
+@@ -143,6 +153,8 @@ class Sistema:
+             self._f_ignorar.write_text(json.dumps(self.ignorados, indent=1), encoding="utf-8")
+ 
+     def agregar_camara(self, cam: dict, guardar: bool = True) -> None:
++        if isinstance(cam.get("fuente"), str):        # también corrige las ya guardadas con https://IP:8080
++            cam = {**cam, "fuente": normalizar_celular(cam["fuente"])}
+         self.zonas.setdefault(cam["id"], [])
+         self.trabajadores[cam["id"]] = Trabajador(cam, self.cfg, self.alertas, self.zonas[cam["id"]],
+                                                   demo=str(cam["fuente"]) == "demo")
+@@ -331,6 +343,7 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
+             fuente = str(c.get("fuente", "")).strip()
+             if not fuente:
+                 return JSONResponse({"error": "Indica la fuente"}, status_code=400)
++            fuente = normalizar_celular(fuente)
+             if PAGINAS_DE_VIDEO.search(fuente):
+                 # una página (YouTube, Facebook, TikTok…) no es un video: se descarga con yt-dlp y se agrega al terminar
+                 if not descargas_disponibles():
+diff --git a/web/index.html b/web/index.html
+index 61be49a..6d60915 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -101,6 +101,7 @@
+       <label>Fuente o enlace<input name="fuente" placeholder="0  ·  rtsp://…  ·  https://…/video.mp4"></label>
+       <div class="ayuda">
+         <p><b>0</b>, <b>1</b>…: webcam de la laptop.</p>
++        <p><b>Celular:</b> con IP Webcam, <code>http://IP:8080/video</code>; con DroidCam, <code>http://IP:4747/video</code>. Celular y laptop en la misma red Wi-Fi.</p>
+         <p><b>Hikvision:</b> <code>rtsp://usuario:clave@IP:554/Streaming/Channels/101</code></p>
+         <p><b>Dahua:</b> <code>rtsp://usuario:clave@IP:554/cam/realmonitor?channel=1&amp;subtype=0</code></p>
+         <p><b>Enlace:</b> dirección directa de un video (<code>…/video.mp4</code>), que se reproduce en bucle, o de una transmisión (<code>…/stream.m3u8</code>).</p>
+diff --git a/web/static/app.js b/web/static/app.js
+index f3fa3a3..90a315e 100644
+--- a/web/static/app.js
++++ b/web/static/app.js
+@@ -58,8 +58,18 @@ function pintarCamaras() {
+       };
+       cab.append(quitar);
+       const video = el("div", "video");
+-      const img = el("img"); img.alt = `Video de ${c.nombre}`; img.src = `/video/${c.id}?t=${Date.now()}`;
+-      img.onerror = () => setTimeout(() => { img.src = `/video/${c.id}?t=${Date.now()}`; }, 2000);
++      const img = el("img"); img.alt = `Video de ${c.nombre}`;
++      // Cada cuadro se pide por separado en vez de mantener un video MJPEG abierto: el navegador solo admite
++      // 6 conexiones abiertas a la vez con el mismo servidor, y con 5 cámaras y las alertas en vivo se llenaban.
++      // Entonces cualquier otro pedido (quitar una cámara, las imágenes de las alertas) quedaba esperando sin fin.
++      const cargar = () => {
++        if (!img.isConnected) return;                          // la cámara se quitó
++        if (document.hidden) { setTimeout(cargar, 1000); return; }
++        img.src = `/api/captura/${c.id}?t=${Date.now()}`;
++      };
++      img.onload = () => setTimeout(cargar, 100);
++      img.onerror = () => setTimeout(cargar, 1000);             // aún sin imagen o cámara caída
++      setTimeout(cargar, 0);
+       video.append(img, el("div", "estado"));
+       tarjeta.append(cab, video, el("div", "emociones"));
+       cont.append(tarjeta);

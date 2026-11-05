@@ -14,9 +14,11 @@ import numpy as np
 
 from .historial import Historial, Muestra, Pista
 from .tipos import (CADERA_D, CADERA_I, CODO_D, CODO_I, EMOCIONES, HOMBRO_D, HOMBRO_I,
-                    MUNECA_D, MUNECA_I, TOBILLO_D, TOBILLO_I, Evento, Observacion)
+                    MUNECA_D, MUNECA_I, NARIZ, OJO_D, OJO_I, OREJA_D, OREJA_I, RODILLA_D, RODILLA_I, TOBILLO_D,
+                    TOBILLO_I,
+                    Evento, Observacion, alto_estimado)
 
-VEHICULOS = {"bicicleta", "auto", "motocicleta"}
+VEHICULOS = {"bicicleta", "auto", "motocicleta", "bicicleta o moto"}
 PORTATILES = {"mochila", "bolso", "maleta", "laptop", "celular"}
 ARMAS = {"cuchillo", "bate"}
 
@@ -119,6 +121,15 @@ def zona_activa(z: dict, ahora: hora) -> bool:
     return d <= ahora < a if d < a else (ahora >= d or ahora < a)
 
 
+def iou(a, b) -> float:
+    """Intersección sobre unión de dos cajas [x1, y1, x2, y2]."""
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return float(inter / union) if union > 0 else 0.0
+
+
 def solape(caja_persona, caja_objeto) -> float:
     """Fracción de la caja de la persona que cae dentro de la caja del objeto."""
     ix = max(0.0, min(caja_persona[2], caja_objeto[2]) - max(caja_persona[0], caja_objeto[0]))
@@ -162,6 +173,46 @@ def es_horizontal(m: Muestra, umbral: float) -> bool:
     return w / max(h, 1) > 1.3
 
 
+def _media(m: Muestra, indices, conf_min: float = 0.3) -> Optional[np.ndarray]:
+    if m.puntos is None:
+        return None
+    pts = [m.puntos[i] for i in indices if m.conf_puntos is None or m.conf_puntos[i] >= conf_min]
+    return np.mean(pts, axis=0) if pts else None
+
+
+CABEZA = (NARIZ, OJO_I, OJO_D, OREJA_I, OREJA_D)
+
+
+def largo_cuerpo(m: Muestra) -> float:
+    """Cabeza-cadera-tobillos medido sobre el cuerpo: casi no cambia al acostarse (sí la altura de la caja)."""
+    cab, cad, pies = _media(m, CABEZA), _medio(m, CADERA_I, CADERA_D), _media(m, (TOBILLO_I, TOBILLO_D))
+    if cab is None or cad is None or pies is None:
+        return 0.0
+    return float(np.linalg.norm(cab - cad) + np.linalg.norm(cad - pies))
+
+
+def esta_tendido(m: Muestra, umbral: float, alto_ref: float) -> bool:
+    """¿La persona quedó en el suelo? Se mira cuánto se «aplastó» el cuerpo en vertical respecto de su altura
+    de pie: cabeza casi a la altura de la cadera y cadera casi a la altura de los pies. Esa medida no depende
+    de hacia dónde mire la cámara ni de hacia dónde cayó la persona (de costado, hacia la cámara o alejándose,
+    con la cámara a la altura del pecho o elevada como una de seguridad). Inclinarse a recoger algo no cuenta:
+    las piernas siguen sosteniendo la cadera.
+    """
+    cad = _medio(m, CADERA_I, CADERA_D)
+    cab, pies = _media(m, CABEZA), _media(m, (TOBILLO_I, TOBILLO_D))
+    alto = max(alto_ref, largo_cuerpo(m) / 0.85, 1.0)
+    if cad is not None and pies is not None and (pies[1] - cad[1]) / alto >= 0.35:
+        return False                       # de pie, inclinado o agachado: las piernas sostienen la cadera
+    if cad is not None and cab is not None and (cad[1] - cab[1]) / alto >= 0.33:
+        return False                       # sentado o en cuclillas: el tronco sigue erguido sobre la cadera
+    rodillas = _media(m, (RODILLA_I, RODILLA_D))
+    if rodillas is not None and pies is not None and (pies[1] - rodillas[1]) / alto >= 0.18:
+        return False                       # agachado para recoger algo: las canillas siguen verticales
+    if cad is not None and cab is not None and pies is not None:
+        return True                        # cuerpo aplastado en vertical: tendido, mire de donde mire la cámara
+    return es_horizontal(m, umbral)        # faltan puntos (persona tapada o lejos): ángulo del tronco o caja
+
+
 # --------------------------------------------------------------------------- reglas
 class Reglas:
     def __init__(self, cfg: dict):
@@ -170,6 +221,27 @@ class Reglas:
         self._contactos: dict = {}       # (quien toca, a quien) -> último instante de contacto
         self._multitud_desde = None
         self.reloj = lambda: datetime.now().time()   # se reemplaza en las pruebas
+        self._t0 = None                  # primer cuadro analizado: lo que ya estaba es parte del escenario
+        self._escenario: list = []       # cajas de objetos que pertenecen al lugar (escaparates, estantes…)
+        self.ignorar: list = []          # cajas que el operador marcó como falsa alarma
+
+    # ---- escenario aprendido
+    def aprender_ignorar(self, caja) -> None:
+        """El operador marcó una alerta como falsa: ese objeto o vehículo no vuelve a alertar en ese lugar."""
+        caja = [float(v) for v in caja]
+        if not any(iou(caja, c) >= 0.6 for c in self.ignorar):
+            self.ignorar.append(caja)
+
+    def _ignorado(self, caja) -> bool:
+        return any(iou(caja, c) >= 0.4 for c in self.ignorar)
+
+    def _es_escenario(self, caja) -> bool:
+        return any(iou(caja, c) >= 0.4 for c in self._escenario)
+
+    def _recordar_escenario(self, caja) -> None:
+        caja = [float(v) for v in caja]
+        if not self._es_escenario(caja) and len(self._escenario) < 300:
+            self._escenario.append(caja)
 
     def actualizar_cfg(self, cfg: dict):
         self.cfg = cfg
@@ -178,6 +250,8 @@ class Reglas:
                 zonas: list[dict]) -> list[Evento]:
         ev: list[Evento] = []
         r = self.cfg
+        if self._t0 is None:
+            self._t0 = obs.t
         self._rap = self._rapidez(obs, hist)
         if r["violencia"]["activa"]:
             ev += self._violencia(obs, hist)
@@ -260,9 +334,11 @@ class Reglas:
             est = pista.estado.setdefault("caida", {"horiz_desde": None, "vert_desde": t,
                                                      "caida": False, "suelo": False})
             ultima = pista.muestras[-1]
-            if es_horizontal(ultima, c["angulo_horizontal"]):
+            # la altura de pie se fija al empezar a caer: tendida en el suelo, la caja ya no sirve de escala
+            alto = est["alto_ref"] if est["horiz_desde"] is not None and est.get("alto_ref") else pista.alto_de_pie(t, 6.0)
+            if esta_tendido(ultima, c["angulo_horizontal"], alto):
                 if est["horiz_desde"] is None:
-                    est["horiz_desde"] = t
+                    est["horiz_desde"], est["alto_ref"] = t, alto
                 est["vert_desde"] = None
             else:
                 if est["vert_desde"] is None:
@@ -271,8 +347,9 @@ class Reglas:
                     est.update(horiz_desde=None, caida=False, suelo=False)
                 continue
             tendido = t - est["horiz_desde"]
-            alto = pista.alto_de_pie(t, 6.0)
-            if not est["caida"] and tendido >= 0.5:
+            alto = max(est["alto_ref"], largo_cuerpo(ultima) / 0.85, 1.0)
+            if not est["caida"] and tendido >= 1.0:    # agacharse un instante no cuenta: en el suelo 1 s
+
                 previas = [m for m in pista.muestras if est["horiz_desde"] - 2.5 <= m.t <= est["horiz_desde"]]
                 if previas:
                     ys = [_torso(m)[1] for m in previas]
@@ -282,7 +359,7 @@ class Reglas:
                         out.append(Evento(
                             "caida", "alta", f"Caída de la persona #{p.id}",
                             f"El centro de la cadera bajó {descenso:.2f} alturas en menos de 2.5 s y el "
-                            f"tronco quedó a más de {c['angulo_horizontal']}° de la vertical.",
+                            f"cuerpo quedó a ras del suelo (cabeza y cadera casi a la altura de los pies).",
                             f"caida:{p.id}", [p.caja.tolist()]))
             if not est["suelo"] and tendido >= c["en_suelo_alerta"]:
                 est["suelo"] = True
@@ -325,7 +402,7 @@ class Reglas:
                             "merodeo", "media", f"Merodeo en «{z['nombre']}» (persona #{p.id})",
                             f"Permanece {estancia:.0f} s en la zona (límite {c['merodeo']['tiempo_max']} s).",
                             f"merodeo:{z['id']}:{p.id}", [p.caja.tolist()]))
-            if not zonas_merodeo and c["merodeo"]["activa"]:
+            if not zonas_merodeo and c["merodeo"]["activa"] and c["merodeo"].get("sin_zonas", False):
                 estancia = t - pista.primera_vez
                 if estancia >= c["merodeo"]["tiempo_max"]:
                     out.append(Evento(
@@ -336,15 +413,99 @@ class Reglas:
         return out
 
     # ---- objetos abandonados y posible hurto
+    @staticmethod
+    def _quien_paso_cerca(hist, centro, desde: float, hasta: float, limite: float = 1.0):
+        """Persona que estuvo más cerca de un punto entre dos instantes (en alturas de esa persona).
+        Sirve para saber quién dejó un objeto aunque su cuerpo lo tapara mientras lo dejaba."""
+        mejor = None
+        for pista in hist.personas.values():
+            for m in pista.muestras:
+                if desde <= m.t <= hasta:
+                    alto = alto_estimado(m.caja, m.puntos, m.conf_puntos)
+                    cx, cy = (m.caja[0] + m.caja[2]) / 2, (m.caja[1] + m.caja[3]) / 2
+                    d = float(np.hypot(cx - centro[0], cy - centro[1])) / alto
+                    if d <= limite and (mejor is None or d < mejor[0]):
+                        mejor = (d, pista.id)
+        return None if mejor is None else mejor[1]
+
+    def _perdidos(self, obs, hist) -> list[Evento]:
+        """Objetos quietos y con dueño que dejaron de verse. Al levantarlo, la mano y el cuerpo tapan el objeto
+        y el detector lo pierde: si quien estaba al lado no es el dueño y se alejó, se lo llevó."""
+        t, out = obs.t, []
+        visibles = [o for o in obs.objetos if o.clase in PORTATILES]
+        for oid, pista in hist.objetos.items():
+            est = pista.estado
+            perdido = t - pista.ultima_vez
+            if (est.get("resuelto") or not est.get("estuvo_quieto") or perdido < 0.8 or perdido > 4.5
+                    or hist.clase_objeto.get(oid) not in PORTATILES):
+                continue
+            ultima = pista.muestras[-1]
+            centro = np.array([(ultima.caja[0] + ultima.caja[2]) / 2, (ultima.caja[1] + ultima.caja[3]) / 2])
+            if any(iou(o.caja, ultima.caja) >= 0.2 for o in visibles):
+                est["resuelto"] = True              # el detector lo volvió a ver con otro número: sigue ahí
+                continue
+            cerca = est.get("ultimo_cerca")         # (persona, distancia) cuando se vio por última vez
+            if not cerca or cerca[1] > 1.2:
+                continue                            # nadie al lado: se tapó o el detector falló; se espera
+            quien = hist.personas.get(cerca[0])
+            if quien is not None and t - quien.ultima_vez < 0.5:
+                m = quien.muestras[-1]
+                alto = alto_estimado(m.caja, m.puntos, m.conf_puntos)
+                lejos = np.hypot((m.caja[0] + m.caja[2]) / 2 - centro[0], (m.caja[1] + m.caja[3]) / 2 - centro[1]) / alto
+                if lejos < 1.0:
+                    continue                        # sigue parado ahí (puede estar tapándolo): aún no se decide
+            est["resuelto"] = True
+            clase, dueno = hist.clase_objeto.get(oid, "objeto"), est.get("dueno")
+            if dueno is not None and cerca[0] != dueno:
+                out.append(Evento(
+                    "hurto", "alta", f"Posible hurto: la persona #{cerca[0]} se lleva una {clase}",
+                    f"La {clase} estaba inmóvil y asociada a la persona #{dueno}; dejó de verse cuando la persona "
+                    f"#{cerca[0]} estaba a {cerca[1]:.1f} alturas, y esa persona se alejó.",
+                    f"hurto:{oid}:{cerca[0]}", [ultima.caja.tolist()]))
+            elif est.get("abandonado"):
+                out.append(Evento(
+                    "hurto", "baja", f"La persona #{cerca[0]} retiró una {clase} abandonada",
+                    "El objeto había sido marcado como abandonado y dejó de verse junto a esa persona.",
+                    f"retiro:{oid}:{cerca[0]}", [ultima.caja.tolist()]))
+        return out
+
+    def _heredar(self, o, est, hist, t) -> bool:
+        """Un objeto que aparece de golpe junto a donde se perdió otro quieto es el mismo objeto con otro número
+        de seguimiento (pasa al levantarlo): conserva su dueño y su historia."""
+        diag = float(np.hypot(o.caja[2] - o.caja[0], o.caja[3] - o.caja[1]))
+        for oid, pista in hist.objetos.items():
+            pe = pista.estado
+            if (oid == o.id or pe.get("resuelto") or not pe.get("estuvo_quieto") or "dueno" not in pe
+                    or not 0.1 < t - pista.ultima_vez <= 3.0 or hist.clase_objeto.get(oid) not in PORTATILES):
+                continue
+            u = pista.muestras[-1].caja
+            if np.hypot((u[0] + u[2]) / 2 - o.centro[0], (u[1] + u[3]) / 2 - o.centro[1]) <= 2.0 * diag:
+                pe["resuelto"] = True
+                est.update(origen="nuevo", visto_desde=pe.get("visto_desde", t), dueno=pe["dueno"],
+                           estuvo_quieto=True, abandonado=pe.get("abandonado", False), heredado_de=oid)
+                return True
+        return False
+
     def _objetos(self, obs, hist) -> list[Evento]:
         c = self.cfg["objetos"]
         t = obs.t
-        out = []
+        out = self._perdidos(obs, hist)
         for o in obs.objetos:
             pista = hist.objetos.get(o.id)
             if pista is None or o.clase not in PORTATILES:   # vehículos y armas tienen sus propias reglas
                 continue
             est = pista.estado
+            if self._ignorado(o.caja):
+                continue
+            # ¿llegó con alguien o ya era parte del lugar? Solo un objeto que alguien trajo puede quedar abandonado:
+            # lo que se ve desde el inicio, lo que ya se recordaba en ese sitio o lo que aparece sin nadie al lado
+            # (un estante, una prenda en un escaparate) es escenario.
+            if "origen" not in est and not self._heredar(o, est, hist, t):
+                ya_estaba = t - self._t0 < c.get("calentamiento", 10) or self._es_escenario(o.caja)
+                est["origen"], est["visto_desde"] = ("escenario" if ya_estaba else "nuevo"), t
+            if est["origen"] == "escenario":
+                self._recordar_escenario(o.caja)
+                continue
             diag = float(np.hypot(o.caja[2] - o.caja[0], o.caja[3] - o.caja[1]))
             ultimos = pista.ventana(t, 1.5)
             mov = float(np.linalg.norm(ultimos[-1].caja[:2] - ultimos[0].caja[:2])) if len(ultimos) > 1 else 0.0
@@ -354,8 +515,18 @@ class Reglas:
                 return float(np.linalg.norm(per.centro - o.centro)) / per.alto
 
             cerca = sorted(((cercania(per), per) for per in obs.personas), key=lambda x: x[0])
-            if "dueno" not in est and cerca and cerca[0][0] <= 1.0:
-                est["dueno"] = cerca[0][1].id
+            est["ultimo_cerca"] = (cerca[0][1].id, cerca[0][0]) if cerca else None
+            if "dueno" not in est:
+                # quien estaba al lado cuando apareció lo trajo; también vale quien pasó junto a ese lugar justo
+                # antes, porque al dejarlo su propio cuerpo suele tapar el objeto
+                quien = (cerca[0][1].id if cerca and cerca[0][0] <= 1.0 else
+                         self._quien_paso_cerca(hist, o.centro, est["visto_desde"] - 3.0, t))
+                if quien is not None and t - est["visto_desde"] <= 3.0:
+                    est["dueno"] = quien
+                elif t - est["visto_desde"] > 3.0:
+                    est["origen"] = "escenario"            # apareció sin nadie cerca: no lo trajo nadie
+                    self._recordar_escenario(o.caja)
+                    continue
             if quieto:
                 est.setdefault("quieto_desde", t)
                 tiempo_quieto = t - est["quieto_desde"]
@@ -403,7 +574,7 @@ class Reglas:
         out = []
         self._puestos = [q for q in self._puestos if t - q["ult"] <= 5.0]
         for o in obs.objetos:
-            if o.clase not in VEHICULOS:
+            if o.clase not in VEHICULOS or self._ignorado(o.caja):
                 continue
             diag = float(np.hypot(o.caja[2] - o.caja[0], o.caja[3] - o.caja[1]))
             cerca = [q for q in self._puestos if q["clase"] == o.clase

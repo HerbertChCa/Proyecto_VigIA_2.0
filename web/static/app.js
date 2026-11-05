@@ -44,11 +44,32 @@ function pintarCamaras() {
       const cab = el("div", "camara-cab");
       cab.append(el("h3", null, c.nombre), el("span", "meta"));
       const quitar = el("button", "quitar", "✕"); quitar.title = "Quitar cámara";
-      quitar.onclick = async () => { if (confirm(`¿Quitar la cámara «${c.nombre}»?`)) { await api(`/api/camaras/${c.id}`, { method: "DELETE" }); } };
+      quitar.onclick = async () => {
+        if (!confirm(`¿Quitar la cámara «${c.nombre}»?`)) return;
+        quitar.disabled = true;
+        try {
+          await api(`/api/camaras/${c.id}`, { method: "DELETE" });
+        } catch (e) {
+          if (!/ya no existe/.test(e.message)) { quitar.disabled = false; alert(`No se pudo quitar la cámara: ${e.message}`); return; }
+        }
+        // sin esperar al siguiente estado del servidor: si la conexión en vivo está caída, la tarjeta igual desaparece
+        estado.camaras = estado.camaras.filter((x) => x.id !== c.id);
+        tarjeta.remove();
+      };
       cab.append(quitar);
       const video = el("div", "video");
-      const img = el("img"); img.alt = `Video de ${c.nombre}`; img.src = `/video/${c.id}?t=${Date.now()}`;
-      img.onerror = () => setTimeout(() => { img.src = `/video/${c.id}?t=${Date.now()}`; }, 2000);
+      const img = el("img"); img.alt = `Video de ${c.nombre}`;
+      // Cada cuadro se pide por separado en vez de mantener un video MJPEG abierto: el navegador solo admite
+      // 6 conexiones abiertas a la vez con el mismo servidor, y con 5 cámaras y las alertas en vivo se llenaban.
+      // Entonces cualquier otro pedido (quitar una cámara, las imágenes de las alertas) quedaba esperando sin fin.
+      const cargar = () => {
+        if (!img.isConnected) return;                          // la cámara se quitó
+        if (document.hidden) { setTimeout(cargar, 1000); return; }
+        img.src = `/api/captura/${c.id}?t=${Date.now()}`;
+      };
+      img.onload = () => setTimeout(cargar, 100);
+      img.onerror = () => setTimeout(cargar, 1000);             // aún sin imagen o cámara caída
+      setTimeout(cargar, 0);
       video.append(img, el("div", "estado"));
       tarjeta.append(cab, video, el("div", "emociones"));
       cont.append(tarjeta);
@@ -92,9 +113,11 @@ function tarjetaAlerta(a, nueva) {
   const img = el("img"); img.src = `/capturas/${a.captura}`; img.alt = "Captura"; img.loading = "lazy";
   img.onclick = () => abrirCaptura(a);
   const cuerpo = el("div");
-  cuerpo.append(el("div", "tipo", `${a.tipo_nombre} · ${a.camara}`), el("div", "msj", a.mensaje), el("div", "det", a.explicacion));
+  const tipo = el("div", "tipo", `${a.tipo_nombre} · ${a.camara}`);
+  if (a.repeticiones > 1) tipo.append(el("span", "veces", `×${a.repeticiones}`));
+  cuerpo.append(tipo, el("div", "msj", a.mensaje), el("div", "det", a.explicacion));
   const pie = el("div", "pie-alerta");
-  pie.append(el("span", "cuando", fechaCorta(a.fecha)));
+  pie.append(el("span", "cuando", a.repeticiones > 1 && a.ultima ? `${fechaCorta(a.fecha)} – ${hora(a.ultima)}` : fechaCorta(a.fecha)));
   pie.append(accionesAlerta(a));
   cuerpo.append(pie);
   li.append(el("div", `sev ${a.severidad}`), img, cuerpo);
@@ -140,10 +163,13 @@ async function cargarAlertas() {
 }
 function llegaAlerta(a) {
   alertasCargadas.set(a.id, a);
+  if (alertasCargadas.size > 500) alertasCargadas.delete(alertasCargadas.keys().next().value);
   camaraEnAlerta.set(a.camara, Date.now());
   if (a.severidad === "alta") pitido();
   if (filtro && a.tipo !== filtro) return;
-  $("#alertas").prepend(tarjetaAlerta(a, true));
+  const lista = $("#alertas");
+  lista.prepend(tarjetaAlerta(a, true));
+  while (lista.children.length > 150) lista.lastElementChild.remove();   // con horas de uso, el panel no se vuelve pesado
   $("#sin-alertas").hidden = true;
 }
 function abrirCaptura(a) {
@@ -166,6 +192,16 @@ function conectar() {
       $("#btn-esqueleto").setAttribute("aria-pressed", String(!!datos.solo_esqueleto));
     }
     else if (evento === "alerta") llegaAlerta(datos);
+    else if (evento === "repetida") {
+      // la misma situación sigue ocurriendo: se suma a la alerta pendiente en vez de crear otra fila
+      const a = alertasCargadas.get(datos.id);
+      if (a) {
+        a.repeticiones = datos.repeticiones; a.ultima = datos.ultima;
+        const li = document.querySelector(`.alerta[data-id="${datos.id}"]`);
+        if (li) li.replaceWith(tarjetaAlerta(a, false));
+      }
+      camaraEnAlerta.set(datos.camara, Date.now());
+    }
     else if (evento === "atendida") {
       const a = alertasCargadas.get(datos.id);
       if (a) { a.atendida = 1; a.veredicto = datos.veredicto; }

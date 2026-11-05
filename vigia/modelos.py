@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +30,20 @@ def ruta_modelo(ruta: str) -> str:
         return str(p)
     return p.name
 
+# Las cámaras se turnan para usar los modelos: correr varias inferencias a la vez en CPU no es más rápido,
+# solo reparte los núcleos entre todas y deja sin CPU al servidor web.
+_INFERENCIA = threading.Lock()
+
+
+def _fijar_hilos():
+    try:
+        import torch
+        torch.set_num_threads(max(1, (os.cpu_count() or 2) - 1))
+    except Exception:  # noqa: BLE001 - sin torch no hay nada que fijar
+        pass
+    cv2.setNumThreads(1)
+
+
 CLASES_OBJETO = {24: "mochila", 26: "bolso", 28: "maleta", 1: "bicicleta", 2: "auto", 3: "motocicleta", 63: "laptop", 67: "celular",
                  43: "cuchillo", 34: "bate"}
 
@@ -38,6 +54,7 @@ class DetectorYOLO:
     def __init__(self, cfg: dict):
         from ultralytics import YOLO  # se importa aquí para que el modo demo no lo necesite
         self.cfg = cfg
+        _fijar_hilos()
         self.pose = YOLO(ruta_modelo(cfg["pose"]))
         self.obj = YOLO(ruta_modelo(cfg["objetos"]))
         self.n = 0
@@ -46,8 +63,9 @@ class DetectorYOLO:
     def procesar(self, frame: np.ndarray, t: float) -> Observacion:
         c = self.cfg
         obs = Observacion(t=t)
-        r = self.pose.track(frame, persist=True, tracker="bytetrack.yaml", imgsz=c["tamano_imagen"],
-                            conf=c["confianza"], classes=[0], verbose=False)[0]
+        with _INFERENCIA:
+            r = self.pose.track(frame, persist=True, tracker="bytetrack.yaml", imgsz=c["tamano_imagen"],
+                                conf=c["confianza"], classes=[0], verbose=False)[0]
         if r.boxes is not None and r.boxes.id is not None:
             cajas = r.boxes.xyxy.cpu().numpy()
             ids = r.boxes.id.int().cpu().tolist()
@@ -60,8 +78,9 @@ class DetectorYOLO:
                     puntos=None if kxy is None else kxy[i],
                     conf_puntos=None if kcf is None else kcf[i]))
         if self.n % max(1, c["objetos_cada_n_frames"]) == 0:
-            ro = self.obj.track(frame, persist=True, tracker="bytetrack.yaml", imgsz=c["tamano_imagen"],
-                                conf=0.30, classes=list(CLASES_OBJETO), verbose=False)[0]
+            with _INFERENCIA:
+                ro = self.obj.track(frame, persist=True, tracker="bytetrack.yaml", imgsz=c["tamano_imagen"],
+                                    conf=0.30, classes=list(CLASES_OBJETO), verbose=False)[0]
             self._ultimos_objetos = []
             if ro.boxes is not None and ro.boxes.id is not None:
                 for caja, oid, cls, cf in zip(ro.boxes.xyxy.cpu().numpy(), ro.boxes.id.int().cpu().tolist(),

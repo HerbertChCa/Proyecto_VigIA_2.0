@@ -29,12 +29,15 @@ NOMBRES = {
     "estampida": "Huida masiva", "emocion": "Emoción",
 }
 VEREDICTOS = ("confirmada", "falsa")
-COLUMNAS = ["id", "fecha", "camara", "tipo", "severidad", "mensaje", "explicacion", "captura", "atendida", "veredicto"]
+COLUMNAS = ["id", "fecha", "camara", "tipo", "severidad", "mensaje", "explicacion", "captura", "atendida", "veredicto",
+            "repeticiones", "ultima"]
 
 
 class GestorAlertas:
-    def __init__(self, carpeta: Path, enfriamiento: float = 30.0):
+    def __init__(self, carpeta: Path, enfriamiento: float = 30.0, agrupar: float = 0.0):
         self.carpeta = carpeta
+        self.agrupar = agrupar           # s: alertas iguales (cámara, tipo y severidad) dentro de este lapso se suman
+        self._grupos: dict[tuple, dict] = {}
         (carpeta / "capturas").mkdir(parents=True, exist_ok=True)
         self.enfriamiento = enfriamiento
         self._ultima: dict[str, float] = {}
@@ -44,11 +47,14 @@ class GestorAlertas:
             id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT, camara TEXT, tipo TEXT, severidad TEXT,
             mensaje TEXT, explicacion TEXT, captura TEXT, atendida INTEGER DEFAULT 0, veredicto TEXT)""")
         cols = {f[1] for f in self._db.execute("PRAGMA table_info(alertas)")}
-        if "veredicto" not in cols:      # bases creadas con la versión anterior
-            self._db.execute("ALTER TABLE alertas ADD COLUMN veredicto TEXT")
+        for col, tipo in (("veredicto", "TEXT"), ("repeticiones", "INTEGER DEFAULT 1"), ("ultima", "TEXT"),
+                          ("cajas", "TEXT")):
+            if col not in cols:          # bases creadas con versiones anteriores
+                self._db.execute(f"ALTER TABLE alertas ADD COLUMN {col} {tipo}")
         self._db.commit()
         self._suscriptores: list[tuple[asyncio.AbstractEventLoop, asyncio.Queue]] = []
         self.al_guardar = None           # función que recibe el nombre de cada captura nueva (búsqueda CLIP)
+        self.al_descartar = None         # función(camara, tipo, cajas) cuando el operador marca una falsa alarma
 
     # ---- suscripción del panel (Server-Sent Events)
     def suscribir(self) -> asyncio.Queue:
@@ -76,8 +82,38 @@ class GestorAlertas:
                 if ahora - self._ultima.get(clave, 0) < self.enfriamiento:
                     continue
                 self._ultima[clave] = ahora
-            nuevas.append(self._guardar(camara, e, frame))
+                grupo = (camara, e.tipo, e.severidad)
+                g = self._grupos.get(grupo)
+                if self.agrupar and g and ahora - g["ult"] < self.agrupar:
+                    g["ult"] = ahora
+                    repetir = g["id"]
+                else:
+                    repetir = None
+            if repetir is not None:      # la misma situación sigue ocurriendo: se suma a la alerta pendiente
+                self._repetir(repetir, camara, e)
+                continue
+            datos = self._guardar(camara, e, frame)
+            with self._lock:
+                self._grupos[grupo] = {"id": datos["id"], "ult": ahora}
+            nuevas.append(datos)
         return nuevas
+
+    def _repetir(self, aid: int, camara: str, e: Evento) -> None:
+        ahora = datetime.now().isoformat(timespec="seconds")
+        with self._lock:
+            self._db.execute("UPDATE alertas SET repeticiones = COALESCE(repeticiones, 1) + 1, ultima = ? WHERE id = ?",
+                             (ahora, aid))
+            self._db.commit()
+            n = self._db.execute("SELECT repeticiones FROM alertas WHERE id = ?", (aid,)).fetchone()[0]
+        self._difundir({"evento": "repetida", "datos": {
+            "id": aid, "repeticiones": n, "ultima": ahora, "camara": camara, "tipo": e.tipo,
+            "tipo_nombre": NOMBRES.get(e.tipo, e.tipo), "severidad": e.severidad, "mensaje": e.mensaje,
+            "explicacion": e.explicacion}})
+
+    def _cerrar_grupo(self, aid: int) -> None:
+        with self._lock:
+            for k in [k for k, g in self._grupos.items() if g["id"] == aid]:
+                del self._grupos[k]
 
     def _guardar(self, camara: str, e: Evento, frame: np.ndarray) -> dict:
         fecha = datetime.now()
@@ -91,13 +127,16 @@ class GestorAlertas:
             self.al_guardar(nombre)
         with self._lock:
             cur = self._db.execute(
-                "INSERT INTO alertas (fecha, camara, tipo, severidad, mensaje, explicacion, captura) VALUES (?,?,?,?,?,?,?)",
-                (fecha.isoformat(timespec="seconds"), camara, e.tipo, e.severidad, e.mensaje, e.explicacion, nombre))
+                "INSERT INTO alertas (fecha, camara, tipo, severidad, mensaje, explicacion, captura, repeticiones, ultima, cajas)"
+                " VALUES (?,?,?,?,?,?,?,1,?,?)",
+                (fecha.isoformat(timespec="seconds"), camara, e.tipo, e.severidad, e.mensaje, e.explicacion, nombre,
+                 fecha.isoformat(timespec="seconds"), json.dumps([[round(float(v), 1) for v in c] for c in e.cajas])))
             self._db.commit()
             aid = cur.lastrowid
         datos = {"id": aid, "fecha": fecha.isoformat(timespec="seconds"), "camara": camara, "tipo": e.tipo,
                  "tipo_nombre": NOMBRES.get(e.tipo, e.tipo), "severidad": e.severidad, "mensaje": e.mensaje,
-                 "explicacion": e.explicacion, "captura": nombre, "atendida": 0, "veredicto": None}
+                 "explicacion": e.explicacion, "captura": nombre, "atendida": 0, "veredicto": None,
+                 "repeticiones": 1, "ultima": fecha.isoformat(timespec="seconds")}
         self._difundir({"evento": "alerta", "datos": datos})
         return datos
 
@@ -134,6 +173,7 @@ class GestorAlertas:
         with self._lock:
             self._db.execute("UPDATE alertas SET atendida = 1 WHERE id = ?", (aid,))
             self._db.commit()
+        self._cerrar_grupo(aid)
         self._difundir({"evento": "atendida", "datos": {"id": aid, "veredicto": None}})
 
     def dar_veredicto(self, aid: int, valor: str) -> None:
@@ -143,12 +183,17 @@ class GestorAlertas:
         with self._lock:
             self._db.execute("UPDATE alertas SET atendida = 1, veredicto = ? WHERE id = ?", (valor, aid))
             self._db.commit()
+            fila = self._db.execute("SELECT camara, tipo, cajas FROM alertas WHERE id = ?", (aid,)).fetchone()
+        self._cerrar_grupo(aid)
+        if valor == "falsa" and fila and self.al_descartar:     # el sistema aprende de sus errores en este lugar
+            self.al_descartar(fila[0], fila[1], json.loads(fila[2] or "[]"))
         self._difundir({"evento": "atendida", "datos": {"id": aid, "veredicto": valor}})
 
     def resumen(self) -> dict:
         with self._lock:
             filas = self._db.execute(
-                "SELECT tipo, COUNT(*), SUM(atendida = 0) FROM alertas WHERE fecha >= date('now', 'localtime') GROUP BY tipo"
+                "SELECT tipo, SUM(COALESCE(repeticiones, 1)), SUM(atendida = 0) FROM alertas "
+                "WHERE fecha >= date('now', 'localtime') GROUP BY tipo"
             ).fetchall()
         return {t: {"total": n, "pendientes": p or 0} for t, n, p in filas}
 
