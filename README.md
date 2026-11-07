@@ -79,7 +79,8 @@ del operador y el aviso de videovigilancia.
 4. **Cámara IP:** en el panel, **+ Cámara** y escriba la dirección RTSP. Ejemplos:
    - Hikvision: `rtsp://usuario:clave@192.168.1.64:554/Streaming/Channels/101`
    - Dahua: `rtsp://usuario:clave@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0`
-   - Un video: la ruta a un `.mp4`, que se reproduce en bucle (útil para probar con clips de UCF-Crime o RWF-2000).
+   - Un video: la ruta a un `.mp4` (útil para probar con clips de UCF-Crime o RWF-2000). Se analiza completo, cuadro
+     a cuadro, y al terminar queda en el último cuadro (vea «Videos subidos» más abajo).
 5. **Zonas:** botón **Zonas**, elija la cámara, haga clic sobre la imagen para marcar los vértices y doble clic para
    cerrar el polígono. Las «restringidas» generan intrusión; las de «merodeo», alerta por permanencia.
 
@@ -99,7 +100,15 @@ python -m vigia            # o: python -m vigia --demo
 En el panel, **+ Cámara** tiene dos pestañas:
 
 - **Video de mi PC:** elija o arrastre un archivo (MP4, AVI, MOV, MKV o WEBM, hasta 2 GB). Se copia a
-  `datos/videos/`, se analiza en bucle y se borra al quitar la cámara.
+  `datos/videos/`, se analiza y se borra al quitar la cámara.
+
+**Videos subidos.** Un video se analiza a 10 cuadros por cada segundo de video (`fps_objetivo`), aunque la
+computadora sea lenta: si no le da para más, el video avanza en cámara lenta (la tarjeta dice, por ejemplo,
+«cámara lenta ×0.30») en vez de saltarse cuadros. Así un tirón de mochila de 2 s se ve en 20 cuadros y no en 2 o 3.
+Con el botón ⏸ de la tarjeta se pausa; al terminar, el video queda en el último cuadro y ↻ lo vuelve a empezar
+(desde cero: personas, objetos y reglas, sin borrar las alertas). Para que se repita solo, por ejemplo en una feria,
+ponga `repetir_videos: true` en `config.yaml`. Con varios videos a la vez cada uno va más lento, porque comparten la
+computadora: para una prueba, deje solo el que quiere ver.
 - **Cámara o enlace:** el número de la webcam, una dirección RTSP o el enlace **directo** a un video (`…/video.mp4`)
   o a una transmisión (`…/stream.m3u8`).
 - **Enlaces de YouTube, Facebook o TikTok:** son páginas, no videos, así que VigIA los descarga con yt-dlp (hasta
@@ -305,6 +314,7 @@ vigia/
 | Problema | Qué hacer |
 |---|---|
 | Va lento (menos de 5 fps) | En `config.yaml`, baje `tamano_imagen` a 320 y `fps_objetivo` a 6 |
+| Un video subido no da alertas | Mire la tarjeta: si dice «cámara lenta», el análisis va bien, solo más despacio; espere a que pase la escena. Analice un video a la vez y quite las demás cámaras. Para ver qué detectó cuadro por cuadro: `python scripts\diagnosticar_video.py video.mp4` |
 | «No se pudo abrir 0» | Cierre otras apps que usen la webcam (Zoom, Teams) o pruebe con la fuente `1` |
 | La cámara IP no conecta | Pruebe la URL en VLC (Medio → Abrir ubicación de red); verifique usuario, clave y que esté en la misma red |
 | No aparecen emociones | Faltan los modelos ONNX: ejecute `python scripts/descargar_modelos.py` |

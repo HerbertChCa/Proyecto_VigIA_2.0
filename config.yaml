@@ -63,6 +63,10 @@ modelos:
 
 procesamiento:
   fps_objetivo: 10             # frames analizados por segundo y por cámara
+  # Videos subidos: se analizan fps_objetivo cuadros por cada segundo de video, aunque la PC sea lenta (el video
+  # se ve en cámara lenta, pero no se salta nada). Al terminar quedan en el último cuadro; ▶ los repite.
+  repetir_videos: false        # true = vuelven a empezar solos (útil en una feria, sin nadie al lado)
+  objetos_cada_n_frames_videos: 2   # en los videos subidos el detector de objetos corre 1 de cada 2 cuadros
   ancho_max: 960               # se reduce el frame antes de analizarlo
 
 privacidad:

@@ -103,7 +103,19 @@ class DetectorYOLO:
             self._mapa, self._clases, self._conf = CLASES_OBJETO, list(CLASES_OBJETO), 0.20
         self.abierto = abierto is not None
         self.n = 0
+        self.cada_n: int | None = None      # si se fija, reemplaza objetos_cada_n_frames (videos subidos: 2)
         self._ultimos_objetos: list[Objeto] = []
+
+    def reiniciar_seguimiento(self) -> None:
+        """El video volvió a empezar: los seguidores olvidan a las personas y objetos de la vuelta anterior."""
+        for m in (self.pose, self.obj):
+            for tr in getattr(getattr(m, "predictor", None), "trackers", None) or []:
+                try:
+                    tr.reset()
+                except Exception:           # versión de ultralytics sin reset(): se sigue igual
+                    log.debug("No se pudo reiniciar el seguidor", exc_info=True)
+        self.n = 0
+        self._ultimos_objetos = []
 
     def procesar(self, frame: np.ndarray, t: float) -> Observacion:
         c = self.cfg
@@ -122,7 +134,7 @@ class DetectorYOLO:
                     id=int(pid), caja=cajas[i], conf=float(confs[i]),
                     puntos=None if kxy is None else kxy[i],
                     conf_puntos=None if kcf is None else kcf[i]))
-        if self.n % max(1, c["objetos_cada_n_frames"]) == 0:
+        if self.n % max(1, self.cada_n or c["objetos_cada_n_frames"]) == 0:
             # los objetos son más chicos que las personas: se buscan en una imagen más grande, con un seguidor
             # que acepta detecciones de baja confianza (una mochila puesta o una prenda en la mano)
             with _INFERENCIA:

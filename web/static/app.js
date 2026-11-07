@@ -56,7 +56,24 @@ function pintarCamaras() {
         estado.camaras = estado.camaras.filter((x) => x.id !== c.id);
         tarjeta.remove();
       };
-      cab.append(quitar);
+      // Pausa: solo en videos subidos (y en el modo demo); una cámara en vivo no se detiene
+      const pausa = el("button", "pausa", "⏸"); pausa.hidden = true;
+      pausa.onclick = async () => {
+        const ahora = estado.camaras.find((x) => x.id === c.id) || {};
+        const quiere = ahora.terminado ? false : !ahora.pausado;     // terminado: ▶ lo vuelve a empezar
+        pausa.disabled = true;
+        try {
+          await api(`/api/camaras/${c.id}/pausa`, { method: "POST", body: JSON.stringify({ pausado: quiere }) });
+          const actual = estado.camaras.find((x) => x.id === c.id);
+          if (actual) { actual.pausado = quiere; if (!quiere) actual.terminado = false; }   // sin esperar al servidor
+          pintarCamaras();
+        } catch (e) {
+          alert(`No se pudo ${quiere ? "pausar" : "reanudar"} el video: ${e.message}`);
+        } finally {
+          pausa.disabled = false;
+        }
+      };
+      cab.append(pausa, quitar);
       const video = el("div", "video");
       const img = el("img"); img.alt = `Video de ${c.nombre}`;
       // Cada cuadro se pide por separado en vez de mantener un video MJPEG abierto: el navegador solo admite
@@ -74,9 +91,20 @@ function pintarCamaras() {
       tarjeta.append(cab, video, el("div", "emociones"));
       cont.append(tarjeta);
     }
-    tarjeta.querySelector(".meta").textContent = `${c.fps.toFixed(1)} fps · ${c.personas} personas`;
+    // un video subido se analiza completo aunque la PC sea lenta: entonces se ve en cámara lenta
+    const lento = c.velocidad != null && c.velocidad < 0.95 ? ` · cámara lenta ×${c.velocidad.toFixed(2)}` : "";
+    tarjeta.querySelector(".meta").textContent = c.terminado ? `video terminado · ${c.personas} personas`
+      : c.pausado ? `en pausa · ${c.personas} personas`
+      : `${c.fps.toFixed(1)} fps${lento} · ${c.personas} personas`;
+    const boton = tarjeta.querySelector(".pausa");
+    boton.hidden = !c.pausable;
+    boton.textContent = c.terminado ? "↻" : c.pausado ? "▶" : "⏸";
+    boton.title = c.terminado ? "Ver el video otra vez" : c.pausado ? "Reanudar el video" : "Pausar el video";
+    boton.classList.toggle("activa", !!(c.pausado || c.terminado));
     const aviso = tarjeta.querySelector(".estado");
-    aviso.textContent = c.error ? `Error: ${c.error}` : c.conectada ? "" : "Conectando con la cámara…";
+    aviso.textContent = c.error ? `Error: ${c.error}` : !c.conectada ? "Conectando con la cámara…"
+      : c.terminado ? "Fin del video · ↻ para verlo otra vez" : c.pausado ? "⏸ En pausa" : "";
+    aviso.classList.toggle("pausado", !c.error && c.conectada && !!(c.pausado || c.terminado));
     aviso.hidden = !aviso.textContent;
     const emo = tarjeta.querySelector(".emociones"); emo.replaceChildren();
     const lista = Object.entries(c.emociones || {});

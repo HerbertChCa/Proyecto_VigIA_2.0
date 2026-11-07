@@ -1,0 +1,745 @@
+diff --git a/README.md b/README.md
+index 3a1763b..c628c28 100644
+--- a/README.md
++++ b/README.md
+@@ -79,7 +79,8 @@ del operador y el aviso de videovigilancia.
+ 4. **Cámara IP:** en el panel, **+ Cámara** y escriba la dirección RTSP. Ejemplos:
+    - Hikvision: `rtsp://usuario:clave@192.168.1.64:554/Streaming/Channels/101`
+    - Dahua: `rtsp://usuario:clave@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0`
+-   - Un video: la ruta a un `.mp4`, que se reproduce en bucle (útil para probar con clips de UCF-Crime o RWF-2000).
++   - Un video: la ruta a un `.mp4` (útil para probar con clips de UCF-Crime o RWF-2000). Se analiza completo, cuadro
++     a cuadro, y al terminar queda en el último cuadro (vea «Videos subidos» más abajo).
+ 5. **Zonas:** botón **Zonas**, elija la cámara, haga clic sobre la imagen para marcar los vértices y doble clic para
+    cerrar el polígono. Las «restringidas» generan intrusión; las de «merodeo», alerta por permanencia.
+ 
+@@ -99,7 +100,15 @@ python -m vigia            # o: python -m vigia --demo
+ En el panel, **+ Cámara** tiene dos pestañas:
+ 
+ - **Video de mi PC:** elija o arrastre un archivo (MP4, AVI, MOV, MKV o WEBM, hasta 2 GB). Se copia a
+-  `datos/videos/`, se analiza en bucle y se borra al quitar la cámara.
++  `datos/videos/`, se analiza y se borra al quitar la cámara.
++
++**Videos subidos.** Un video se analiza a 10 cuadros por cada segundo de video (`fps_objetivo`), aunque la
++computadora sea lenta: si no le da para más, el video avanza en cámara lenta (la tarjeta dice, por ejemplo,
++«cámara lenta ×0.30») en vez de saltarse cuadros. Así un tirón de mochila de 2 s se ve en 20 cuadros y no en 2 o 3.
++Con el botón ⏸ de la tarjeta se pausa; al terminar, el video queda en el último cuadro y ↻ lo vuelve a empezar
++(desde cero: personas, objetos y reglas, sin borrar las alertas). Para que se repita solo, por ejemplo en una feria,
++ponga `repetir_videos: true` en `config.yaml`. Con varios videos a la vez cada uno va más lento, porque comparten la
++computadora: para una prueba, deje solo el que quiere ver.
+ - **Cámara o enlace:** el número de la webcam, una dirección RTSP o el enlace **directo** a un video (`…/video.mp4`)
+   o a una transmisión (`…/stream.m3u8`).
+ - **Enlaces de YouTube, Facebook o TikTok:** son páginas, no videos, así que VigIA los descarga con yt-dlp (hasta
+@@ -305,6 +314,7 @@ vigia/
+ | Problema | Qué hacer |
+ |---|---|
+ | Va lento (menos de 5 fps) | En `config.yaml`, baje `tamano_imagen` a 320 y `fps_objetivo` a 6 |
++| Un video subido no da alertas | Mire la tarjeta: si dice «cámara lenta», el análisis va bien, solo más despacio; espere a que pase la escena. Analice un video a la vez y quite las demás cámaras. Para ver qué detectó cuadro por cuadro: `python scripts\diagnosticar_video.py video.mp4` |
+ | «No se pudo abrir 0» | Cierre otras apps que usen la webcam (Zoom, Teams) o pruebe con la fuente `1` |
+ | La cámara IP no conecta | Pruebe la URL en VLC (Medio → Abrir ubicación de red); verifique usuario, clave y que esté en la misma red |
+ | No aparecen emociones | Faltan los modelos ONNX: ejecute `python scripts/descargar_modelos.py` |
+diff --git a/config.yaml b/config.yaml
+index 6c5c056..668c48f 100644
+--- a/config.yaml
++++ b/config.yaml
+@@ -57,6 +57,10 @@ modelos:
+ 
+ procesamiento:
+   fps_objetivo: 10             # frames analizados por segundo y por cámara
++  # Videos subidos: se analizan fps_objetivo cuadros por cada segundo de video, aunque la PC sea lenta (el video
++  # se ve en cámara lenta, pero no se salta nada). Al terminar quedan en el último cuadro; ▶ los repite.
++  repetir_videos: false        # true = vuelven a empezar solos (útil en una feria, sin nadie al lado)
++  objetos_cada_n_frames_videos: 2   # en los videos subidos el detector de objetos corre 1 de cada 2 cuadros
+   ancho_max: 960               # se reduce el frame antes de analizarlo
+ 
+ privacidad:
+diff --git a/pruebas/test_reglas.py b/pruebas/test_reglas.py
+index 61f55fc..80b7eb6 100644
+--- a/pruebas/test_reglas.py
++++ b/pruebas/test_reglas.py
+@@ -1492,3 +1492,241 @@ class DuenoEnPantalla(unittest.TestCase):
+             reglas.evaluar(obs, hist, ANCHO, ALTO, [])
+             t += 0.1
+         self.assertEqual(reglas.duenos(hist), {5: 3})
++
++
++class PausaDeVideo(unittest.TestCase):
++    """Pedido después de clase: poder pausar un video subido para explicar lo que está pasando."""
++
++    def _sistema(self, d):
++        from vigia.servidor import Sistema
++        cfg = copy.deepcopy(CFG)
++        cfg["camaras"] = []
++        return Sistema(cfg, Path(d), demo=True)
++
++    def _esperar(self, cond, maximo=5.0):
++        import time as _t
++        fin = _t.time() + maximo
++        while _t.time() < fin and not cond():
++            _t.sleep(0.05)
++        return cond()
++
++    def test_pausa_congela_imagen_y_reloj(self):
++        import time as _t
++        with tempfile.TemporaryDirectory() as d:
++            s = self._sistema(d)
++            try:
++                t = s.trabajadores["demo"]
++                self.assertTrue(self._esperar(lambda: t.jpeg is not None and t.estado.get("pausable")))
++                self.assertTrue(t.pausar(True))
++                self.assertTrue(t.estado["pausado"])
++                _t.sleep(0.3)                                # un cuadro que estuviera en curso termina
++                imagen, reloj = t.jpeg, t._reloj()
++                _t.sleep(0.6)
++                self.assertIs(t.jpeg, imagen)                # no se analiza ni se dibuja nada nuevo
++                self.assertAlmostEqual(t._reloj(), reloj, delta=0.01)   # el reloj del análisis está detenido
++                self.assertTrue(t.pausar(False))
++                self.assertFalse(t.estado["pausado"])
++                self.assertGreaterEqual(t._pausa_total, 0.8)  # el tiempo en pausa no cuenta para las reglas
++                self.assertTrue(self._esperar(lambda: t.jpeg is not imagen))
++            finally:
++                for t in s.trabajadores.values():
++                    t.detener()
++                s.alertas.cerrar()
++
++    def test_camara_en_vivo_no_se_pausa(self):
++        from vigia.camara import Trabajador
++
++        class LectorVivo:
++            finito, pausado, terminado = False, False, False
++
++            def detener(self):
++                pass
++
++        with tempfile.TemporaryDirectory() as d:
++            s = self._sistema(d)
++            try:
++                t = s.trabajadores["demo"]
++                t.demo, t.lector = False, LectorVivo()       # como una cámara RTSP o una webcam
++                self.assertFalse(t.pausable)
++                self.assertFalse(t.pausar(True))
++                self.assertIsNone(t._pausa_desde)
++                t.lector.finito = True                       # un video subido sí
++                self.assertTrue(t.pausar(True))
++                self.assertTrue(t.lector.pausado)
++                t.pausar(False)
++                self.assertFalse(t.lector.pausado)
++                self.assertIsInstance(t, Trabajador)
++            finally:
++                for t in s.trabajadores.values():
++                    t.detener()
++                s.alertas.cerrar()
++
++    def test_ruta_de_pausa(self):
++        """La ruta se llama como lo haría el navegador (ASGI directo: no hace falta instalar httpx)."""
++        import asyncio
++        import json as _json
++        from vigia.servidor import crear_app
++
++        async def pedir(app, ruta, cuerpo=b""):
++            enviado, respuesta = False, {"cuerpo": b""}
++
++            async def recibir():
++                nonlocal enviado
++                if enviado:
++                    await asyncio.sleep(3600)
++                enviado = True
++                return {"type": "http.request", "body": cuerpo, "more_body": False}
++
++            async def enviar(m):
++                if m["type"] == "http.response.start":
++                    respuesta["estado"] = m["status"]
++                elif m["type"] == "http.response.body":
++                    respuesta["cuerpo"] += m.get("body", b"")
++            alcance = {"type": "http", "method": "POST", "path": ruta, "raw_path": ruta.encode(), "query_string": b"",
++                       "headers": [(b"content-type", b"application/json"), (b"host", b"localhost")],
++                       "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 8000), "scheme": "http",
++                       "root_path": "", "http_version": "1.1", "asgi": {"version": "3.0"}}
++            await app(alcance, recibir, enviar)
++            return respuesta["estado"], _json.loads(respuesta["cuerpo"] or b"{}")
++
++        async def probar(d):
++            cfg = copy.deepcopy(CFG)
++            cfg["camaras"] = []
++            app = crear_app(cfg, Path(d), demo=True)
++            async with app.router.lifespan_context(app):
++                sis = app.state.sistema
++                t = sis.trabajadores["demo"]
++                for _ in range(100):
++                    if t.estado.get("pausable"):
++                        break
++                    await asyncio.sleep(0.05)
++                try:
++                    estado, r = await pedir(app, "/api/camaras/demo/pausa", b'{"pausado": true}')
++                    self.assertEqual((estado, r["pausado"]), (200, True))
++                    self.assertTrue(t.estado["pausado"])
++                    estado, r = await pedir(app, "/api/camaras/demo/pausa")      # sin cuerpo: alterna
++                    self.assertEqual((estado, r["pausado"]), (200, False))
++                    estado, _ = await pedir(app, "/api/camaras/nada/pausa", b"{}")
++                    self.assertEqual(estado, 404)
++                finally:
++                    sis.alertas.cerrar()
++
++        with tempfile.TemporaryDirectory() as d:
++            asyncio.run(probar(d))
++
++
++class VideoSubidoACompas(unittest.TestCase):
++    """En clase, dos videos de 9 y 13 s no daban ninguna alerta: la PC analizaba 1.3 cuadros por segundo mientras el
++    video corría a su velocidad real, así que el tirón de la mochila (unos 2 s) caía entre dos cuadros y la mochila
++    nunca juntaba las 3 detecciones que pide el filtro. Ahora el video avanza al ritmo del análisis."""
++
++    FPS = 60
++
++    def _video(self, d, segundos=2.0):
++        import cv2
++        ruta = str(Path(d) / "prueba.mp4")
++        w = cv2.VideoWriter(ruta, cv2.VideoWriter_fourcc(*"mp4v"), self.FPS, (160, 120))
++        for i in range(int(segundos * self.FPS)):
++            f = np.zeros((120, 160, 3), np.uint8)
++            f[:, :] = i % 250                                 # el brillo dice qué cuadro es
++            w.write(f)
++        w.release()
++        return ruta
++
++    def _esperar(self, cond, maximo=5.0):
++        import time as _t
++        fin = _t.time() + maximo
++        while _t.time() < fin and not cond():
++            _t.sleep(0.01)
++        return cond()
++
++    def _tomar(self, lector):
++        caja = {}
++        self.assertTrue(self._esperar(lambda: caja.setdefault("x", lector.tomar()) is not None
++                                      or caja.pop("x") is not None))
++        return caja["x"]
++
++    def test_entrega_diez_cuadros_por_segundo_de_video_sin_saltarse_ninguno(self):
++        import time as _t
++        from vigia.camara import Lector
++        with tempfile.TemporaryDirectory() as d:
++            lector = Lector(self._video(d), fps_analisis=10)
++            try:
++                tiempos = []
++                for _ in range(5):
++                    _, t = self._tomar(lector)
++                    tiempos.append(t)
++                    _t.sleep(0.3)                             # un análisis lento (como en la PC de clase)
++                pasos = np.diff(tiempos)
++                self.assertTrue(np.allclose(pasos, 0.1, atol=0.02), pasos)   # 0.1 s de video por cuadro, siempre
++                self.assertAlmostEqual(lector.paso_video, 0.1, places=2)
++            finally:
++                lector.detener()
++
++    def test_al_terminar_queda_quieto_y_se_puede_repetir(self):
++        from vigia.camara import Lector
++        with tempfile.TemporaryDirectory() as d:
++            lector = Lector(self._video(d, segundos=1.0), fps_analisis=10)
++            try:
++                ultimo = 0.0
++                while not lector.terminado:
++                    r = lector.tomar()
++                    if r is not None:
++                        ultimo = r[1]
++                    self._esperar(lambda: lector.terminado or not lector._tomado, 2.0)
++                self.assertAlmostEqual(ultimo, 1.0, delta=0.15)
++                self.assertIsNone(lector.tomar())             # no vuelve a empezar solo
++                lector.rebobinar()
++                _, t = self._tomar(lector)
++                self.assertEqual(lector.vuelta, 1)
++                self.assertGreater(t, ultimo)                 # el reloj del análisis nunca va hacia atrás
++            finally:
++                lector.detener()
++
++    def test_el_analisis_usa_el_segundo_del_video(self):
++        """El trabajador toma la hora del video (no la del reloj) y, si el video vuelve a empezar, olvida la vuelta
++        anterior pero conserva las falsas alarmas marcadas por el operador."""
++        from vigia.camara import Lector
++        from vigia.servidor import Sistema
++
++        class Detector:
++            vistos: list = []
++            cada_n = None
++            reinicios = 0
++
++            def procesar(self, frame, t):
++                self.vistos.append(t)
++                return Observacion(t=t)
++
++            def reiniciar_seguimiento(self):
++                self.reinicios += 1
++
++        class SinRostros:
++            disponible = False
++
++        with tempfile.TemporaryDirectory() as d:
++            cfg = copy.deepcopy(CFG)
++            cfg["camaras"] = []
++            s = Sistema(cfg, Path(d), demo=True)
++            t = s.trabajadores["demo"]
++            try:
++                t._parar = True                               # se maneja a mano, cuadro por cuadro
++                t.demo, t.sim = False, None
++                t.detector, t.rostros = Detector(), SinRostros()
++                t.lector = Lector(self._video(d, segundos=1.0), fps_analisis=10)
++                t.reglas.ignorar = [[1, 1, 5, 5]]
++                for _ in range(4):
++                    self._esperar(lambda: not t.lector._tomado)
++                    t._paso()
++                self.assertTrue(np.allclose(t.detector.vistos, [0.1, 0.2, 0.3, 0.4], atol=0.02), t.detector.vistos)
++                self.assertEqual(t.detector.cada_n, 2)
++                self.assertIsNotNone(t.estado["velocidad"])
++                t.lector.rebobinar()
++                self.assertTrue(self._esperar(lambda: t.lector.vuelta == 1 and not t.lector._tomado))
++                t._paso()
++                self.assertEqual(t.detector.reinicios, 1)
++                self.assertEqual(t.reglas.ignorar, [[1, 1, 5, 5]])
++            finally:
++                if t.lector:
++                    t.lector.detener()
++                s.alertas.cerrar()
+diff --git a/vigia/camara.py b/vigia/camara.py
+index bb85da4..534e7e4 100644
+--- a/vigia/camara.py
++++ b/vigia/camara.py
+@@ -21,14 +21,33 @@ log = logging.getLogger("vigia.camara")
+ 
+ 
+ class Lector:
+-    """Lee frames en su propio hilo y conserva solo el último (evita acumular retraso en RTSP)."""
++    """Lee frames en su propio hilo.
+ 
+-    def __init__(self, fuente):
++    Cámara en vivo (webcam, celular, RTSP): conserva solo el último cuadro, para no acumular retraso.
++    Video con duración (archivo subido o enlace a un .mp4): avanza al ritmo del análisis, no del reloj. Entrega
++    `fps_analisis` cuadros por cada segundo de video y espera a que el análisis tome uno antes de leer el siguiente.
++    Si la computadora es lenta, el video se ve en cámara lenta, pero cada segundo de video se analiza completo
++    (antes se reproducía a su velocidad real y, a 1-2 cuadros analizados por segundo, un tirón de mochila de dos
++    segundos quedaba entre dos cuadros y la mochila nunca llegaba a confirmarse)."""
++
++    def __init__(self, fuente, fps_analisis: float = 10, repetir: bool = False):
+         self.fuente = int(fuente) if str(fuente).isdigit() else str(fuente)
+         self.es_archivo = isinstance(self.fuente, str) and not self.fuente.lower().startswith(("rtsp", "http"))
+         self.es_enlace = isinstance(self.fuente, str) and self.fuente.lower().startswith(("http://", "https://"))
++        self.fps_analisis = max(1.0, float(fps_analisis))
++        self.repetir = repetir
+         self.frame: Optional[np.ndarray] = None
+         self.conectada = False
++        self.finito = self.es_archivo     # tiene duración (archivo o enlace a un .mp4): se puede pausar
++        self.pausado = False
++        self.terminado = False            # el video llegó al final (queda en el último cuadro)
++        self.vuelta = 0                   # cuántas veces volvió a empezar: el análisis olvida lo anterior
++        self.t_video = 0.0                # segundo del video del cuadro entregado (con las vueltas sumadas)
++        self.paso_video = 1.0 / self.fps_analisis   # segundos de video entre dos cuadros entregados
++        self._numero = 0                  # cuadros entregados
++        self._tomado = True               # el análisis ya tomó el cuadro actual: se puede leer el siguiente
++        self._rebobinar = False
++        self._desfase = 0.0
+         self._parar = False
+         self._lock = threading.Lock()
+         threading.Thread(target=self._bucle, daemon=True).start()
+@@ -62,30 +81,86 @@ class Lector:
+                 continue
+             espera = 1.0
+             fps_archivo = cap.get(cv2.CAP_PROP_FPS) or 25
+-            if not 1 <= fps_archivo <= 120:
++            if not 1 <= fps_archivo <= 240:
+                 fps_archivo = 25
+-            # un enlace a un archivo (.mp4) tiene duración: se reproduce a su velocidad y en bucle, como un archivo local;
++            # un enlace a un archivo (.mp4) tiene duración, como un archivo local;
+             # una transmisión en vivo (.m3u8, RTSP) no tiene número de frames
+             finito = self.es_archivo or (self.es_enlace and (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) > 0)
+-            while not self._parar:
+-                ok, f = cap.read()
+-                if not ok:
+-                    if self.es_archivo:
+-                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+-                        continue
+-                    break                       # enlace terminado o caído: se vuelve a abrir (bucle)
+-                with self._lock:
+-                    self.frame = f
+-                self.conectada = True
+-                if finito:
+-                    time.sleep(1.0 / fps_archivo)
++            self.finito = finito
++            if finito:
++                self._leer_video(cap, fps_archivo)
++            else:
++                self._leer_en_vivo(cap)
+             cap.release()
+             self.conectada = False
+ 
++    def _leer_en_vivo(self, cap):
++        while not self._parar:
++            ok, f = cap.read()
++            if not ok:
++                break                           # transmisión caída: se vuelve a abrir
++            with self._lock:
++                self.frame = f
++                self._numero += 1
++            self.conectada = True
++
++    def _leer_video(self, cap, fps_archivo: float):
++        salto = max(1, round(fps_archivo / self.fps_analisis))   # p. ej. un video de 60 fps: 1 de cada 6 cuadros
++        self.paso_video = salto / fps_archivo
++        leidos = 0
++        while not self._parar:
++            if self._rebobinar:
++                self._rebobinar = False
++                self._desfase = self.t_video + 1.0  # el reloj del análisis sigue avanzando: nunca vuelve atrás
++                self.vuelta += 1
++                self.terminado = False
++                if not self.es_archivo:
++                    return                          # un enlace se vuelve a abrir desde el principio
++                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
++                leidos = 0
++            if self.pausado or self.terminado or not self._tomado:
++                time.sleep(0.005)
++                continue
++            ok = True
++            for _ in range(salto - 1):              # grab() salta cuadros sin convertirlos: más liviano que read()
++                ok = cap.grab()
++                if not ok:
++                    break
++                leidos += 1
++            if ok:
++                ok, f = cap.read()
++            if not ok:
++                if leidos == 0:
++                    time.sleep(1)
++                    return                          # no se pudo leer nada: se reintenta abrirlo
++                if self.repetir:
++                    self._rebobinar = True
++                else:
++                    self.terminado = True           # queda en el último cuadro hasta que se pida repetir
++                continue
++            leidos += 1
++            with self._lock:
++                self.frame = f
++                self.t_video = self._desfase + leidos / fps_archivo
++                self._numero += 1
++                self._tomado = False
++            self.conectada = True
++
+     def ultimo(self) -> Optional[np.ndarray]:
+         with self._lock:
+             return None if self.frame is None else self.frame.copy()
+ 
++    def tomar(self) -> Optional[tuple[np.ndarray, float]]:
++        """Video con duración: el cuadro siguiente y su segundo de video, o None si todavía no hay uno nuevo."""
++        with self._lock:
++            if self._tomado or self.frame is None:
++                return None
++            self._tomado = True
++            return self.frame.copy(), self.t_video
++
++    def rebobinar(self) -> None:
++        self._rebobinar = True
++
+     def detener(self):
+         self._parar = True
+ 
+@@ -112,6 +187,9 @@ class Trabajador:
+         self._parar = False
+         self._reiniciar = False
+         self._t0 = time.time()
++        self._pausa_desde: Optional[float] = None   # instante en que se pausó (solo videos subidos y demo)
++        self._pausa_total = 0.0                     # segundos en pausa acumulados: el reloj del análisis no avanza
++        self._vuelta = 0                            # vuelta del video que se está analizando
+         self.lector = None
+         self.sim = None
+         self.detector = None
+@@ -126,7 +204,8 @@ class Trabajador:
+                 self.sim = Simulador()
+             else:
+                 from .modelos import AnalizadorRostros, DetectorYOLO
+-                self.lector = Lector(self.fuente)
++                proc = self.cfg["procesamiento"]
++                self.lector = Lector(self.fuente, proc["fps_objetivo"], bool(proc.get("repetir_videos", False)))
+                 self.detector = DetectorYOLO(self.cfg["modelos"])
+                 self.rostros = AnalizadorRostros(self.cfg["modelos"]["rostros"], self.cfg["modelos"]["emociones"])
+         except Exception as e:  # p. ej. falta instalar ultralytics
+@@ -139,6 +218,9 @@ class Trabajador:
+         periodo = 1.0 / self.cfg["procesamiento"]["fps_objetivo"]
+         while not self._parar:
+             inicio = time.time()
++            if self._pausa_desde is not None:      # en pausa: se conserva la última imagen y no se analiza nada
++                time.sleep(0.1)
++                continue
+             try:
+                 self._paso()
+             except Exception as e:
+@@ -147,16 +229,53 @@ class Trabajador:
+                 time.sleep(1)
+             time.sleep(max(0.0, periodo - (time.time() - inicio)))
+ 
++    @property
++    def pausable(self) -> bool:
++        """Solo se pausa lo que tiene duración (un video subido o un enlace a un archivo) y el modo demo; una cámara
++        en vivo no se puede detener: lo que pasa mientras tanto se perdería."""
++        return self.demo or (self.lector is not None and self.lector.finito)
++
++    def pausar(self, pausado: bool) -> bool:
++        """Pausa o reanuda el video. Mientras está en pausa el reloj del análisis se detiene, para que al reanudar
++        las reglas no crean que pasó el tiempo (una mochila «quieta» durante la pausa no es un abandono)."""
++        if not self.pausable:
++            return False
++        if pausado and self._pausa_desde is None:
++            self._pausa_desde = time.time()
++        elif not pausado and self.lector is not None and self.lector.terminado:
++            self.lector.rebobinar()                 # el video terminó: ▶ lo vuelve a empezar
++        if not pausado and self._pausa_desde is not None:
++            self._pausa_total += time.time() - self._pausa_desde
++            self._pausa_desde = None
++            self._tiempos.clear()                   # que los fps no cuenten el tiempo en pausa
++        if self.lector is not None:
++            self.lector.pausado = pausado
++        self.estado["pausado"] = self._pausa_desde is not None
++        if not pausado:
++            self.estado["terminado"] = False
++        return True
++
++    def _reloj(self) -> float:
++        """Hora para el análisis: la del sistema menos el tiempo que el video estuvo en pausa."""
++        ahora = self._pausa_desde if self._pausa_desde is not None else time.time()   # en pausa, quieto
++        return ahora - self._pausa_total
++
+     def reiniciar(self) -> None:
+         """Olvida lo aprendido de la escena (personas, objetos, escenario, falsas alarmas). Lo aplica el propio
+         hilo de la cámara en su siguiente cuadro, para no cambiar el estado mientras lo está usando."""
+         self._reiniciar = True
+ 
+-    def _aplicar_reinicio(self) -> None:
++    def _aplicar_reinicio(self, conservar_ignorados: bool = False) -> None:
++        ignorar = self.reglas.ignorar
+         self.hist = Historial()
+         self.filtro = FiltroObjetos(abierto=self.filtro.abierto)
+         self.reglas = Reglas(self.cfg["reglas"])
++        if conservar_ignorados:
++            self.reglas.ignorar = ignorar
++        if self.detector is not None and hasattr(self.detector, "reiniciar_seguimiento"):
++            self.detector.reiniciar_seguimiento()
+         self._en_alerta.clear()
++        self._tiempos.clear()
+         self._reiniciar = False
+ 
+     def _paso(self):
+@@ -164,22 +283,34 @@ class Trabajador:
+             self._aplicar_reinicio()
+         priv = self.cfg["privacidad"]
+         if self.demo:
+-            t = time.time() - self._t0
++            t = self._reloj() - self._t0
+             frame, obs = self.sim.frame(t)
+             self.estado["conectada"] = True
+             if not priv["analizar_emociones"]:
+                 for r in obs.rostros:
+                     r.probs = None
+         else:
+-            frame = self.lector.ultimo()
+             self.estado["conectada"] = self.lector.conectada
+-            if frame is None:
+-                return
++            video = self.lector.finito
++            if video:
++                if self.lector.vuelta != self._vuelta:   # el video volvió a empezar: las personas «saltan» de lugar
++                    self._vuelta = self.lector.vuelta
++                    self._aplicar_reinicio(conservar_ignorados=True)
++                self.estado["terminado"] = self.lector.terminado
++                tomado = self.lector.tomar()
++                if tomado is None:
++                    return                               # el lector todavía no tiene el cuadro siguiente
++                frame, t = tomado                        # reloj del análisis = segundo del video
++                self.detector.cada_n = int(self.cfg["procesamiento"].get("objetos_cada_n_frames_videos", 2))
++            else:
++                frame = self.lector.ultimo()
++                if frame is None:
++                    return
++                t = self._reloj()
+             ancho_max = self.cfg["procesamiento"]["ancho_max"]
+             if frame.shape[1] > ancho_max:
+                 esc = ancho_max / frame.shape[1]
+                 frame = cv2.resize(frame, (ancho_max, int(frame.shape[0] * esc)))
+-            t = time.time()
+             obs = self.detector.procesar(frame, t)
+             if self.rostros.disponible and (priv["difuminar_rostros"] or priv["analizar_emociones"]):
+                 from .modelos import asignar_rostros
+@@ -188,6 +319,12 @@ class Trabajador:
+ 
+         h, w = frame.shape[:2]
+         if not self.demo:            # los objetos del modo demo ya vienen limpios
++            if not self.lector.finito and len(self._tiempos) > 5:
++                # cámara en vivo en una PC lenta: si el detector de objetos pasa pocas veces por segundo, la ventana
++                # para juntar 3 detecciones se alarga (con 4 s fijos, a 1 cuadro por segundo nada se confirmaba)
++                fps_med = (len(self._tiempos) - 1) / max(1e-3, self._tiempos[-1] - self._tiempos[0])
++                cada_n = max(1, self.cfg["modelos"]["objetos_cada_n_frames"])
++                self.filtro.ventana = max(4.0, 1.5 * self.filtro.detecciones_min * cada_n / max(fps_med, 0.1))
+             obs.objetos = self.filtro.filtrar(obs.objetos, t, self.cfg["reglas"]["objetos"], obs.personas)
+         self.hist.actualizar(obs)
+         eventos = self.reglas.evaluar(obs, self.hist, w, h, self.zonas)
+@@ -214,7 +351,13 @@ class Trabajador:
+         self.crudo = frame.copy()
+         self._tiempos.append(ahora)
+         fps = (len(self._tiempos) - 1) / (self._tiempos[-1] - self._tiempos[0]) if len(self._tiempos) > 1 else 0.0
+-        enc = f"{self.nombre}  |  {time.strftime('%H:%M:%S')}  |  {fps:.1f} fps  |  {len(obs.personas)} personas"
++        velocidad = None
++        if self.lector is not None and self.lector.finito:
++            velocidad = round(fps * self.lector.paso_video, 2)      # segundos de video analizados por segundo real
++            enc = (f"{self.nombre}  |  video {t:5.1f} s  |  {fps:.1f} fps"
++                   + (f" (camara lenta x{velocidad:.2f})" if velocidad < 0.95 else "") + f"  |  {len(obs.personas)} personas")
++        else:
++            enc = f"{self.nombre}  |  {time.strftime('%H:%M:%S')}  |  {fps:.1f} fps  |  {len(obs.personas)} personas"
+         if self.demo:
+             enc += "  |  MODO DEMO (escena simulada)"
+         if esqueleto:
+@@ -225,7 +368,8 @@ class Trabajador:
+         if ok:
+             self.jpeg = buf.tobytes()
+         self.estado.update(fps=round(fps, 1), personas=len(obs.personas),
+-                           emociones=dict(Counter(emociones.values())), error=None, ancho=w, alto=h)
++                           emociones=dict(Counter(emociones.values())), error=None, ancho=w, alto=h,
++                           pausable=self.pausable, pausado=self._pausa_desde is not None, velocidad=velocidad)
+ 
+     def actualizar_cfg(self, cfg: dict):
+         self.cfg = cfg
+diff --git a/vigia/modelos.py b/vigia/modelos.py
+index 3af673c..7628e9b 100644
+--- a/vigia/modelos.py
++++ b/vigia/modelos.py
+@@ -103,8 +103,20 @@ class DetectorYOLO:
+             self._mapa, self._clases, self._conf = CLASES_OBJETO, list(CLASES_OBJETO), 0.20
+         self.abierto = abierto is not None
+         self.n = 0
++        self.cada_n: int | None = None      # si se fija, reemplaza objetos_cada_n_frames (videos subidos: 2)
+         self._ultimos_objetos: list[Objeto] = []
+ 
++    def reiniciar_seguimiento(self) -> None:
++        """El video volvió a empezar: los seguidores olvidan a las personas y objetos de la vuelta anterior."""
++        for m in (self.pose, self.obj):
++            for tr in getattr(getattr(m, "predictor", None), "trackers", None) or []:
++                try:
++                    tr.reset()
++                except Exception:           # versión de ultralytics sin reset(): se sigue igual
++                    log.debug("No se pudo reiniciar el seguidor", exc_info=True)
++        self.n = 0
++        self._ultimos_objetos = []
++
+     def procesar(self, frame: np.ndarray, t: float) -> Observacion:
+         c = self.cfg
+         obs = Observacion(t=t)
+@@ -122,7 +134,7 @@ class DetectorYOLO:
+                     id=int(pid), caja=cajas[i], conf=float(confs[i]),
+                     puntos=None if kxy is None else kxy[i],
+                     conf_puntos=None if kcf is None else kcf[i]))
+-        if self.n % max(1, c["objetos_cada_n_frames"]) == 0:
++        if self.n % max(1, self.cada_n or c["objetos_cada_n_frames"]) == 0:
+             # los objetos son más chicos que las personas: se buscan en una imagen más grande, con un seguidor
+             # que acepta detecciones de baja confianza (una mochila puesta o una prenda en la mano)
+             with _INFERENCIA:
+diff --git a/vigia/servidor.py b/vigia/servidor.py
+index 69e8488..a1a0eed 100644
+--- a/vigia/servidor.py
++++ b/vigia/servidor.py
+@@ -492,6 +492,21 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
+             return JSONResponse({"error": "esa cámara ya no existe; recargue la página"}, status_code=404)
+         return JSONResponse({"ok": True})
+ 
++    async def pausa(req: Request):
++        """Pausa o reanuda un video subido. Cuerpo {"pausado": true|false}; sin cuerpo, alterna."""
++        t = sis.trabajadores.get(req.path_params["cid"])
++        if t is None:
++            return JSONResponse({"error": "La cámara ya no existe."}, status_code=404)
++        try:
++            datos = await req.json()
++        except ValueError:
++            datos = {}
++        quiere = bool(datos.get("pausado", not t.estado.get("pausado", False)))
++        if not t.pausar(quiere):
++            return JSONResponse({"error": "Solo se pueden pausar los videos subidos; una cámara en vivo no se detiene."},
++                                status_code=400)
++        return JSONResponse({"ok": True, "pausado": quiere})
++
+     async def reiniciar(_):
+         return JSONResponse({"ok": True, "borradas": sis.reiniciar()})
+ 
+@@ -512,6 +527,7 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
+         Route("/api/alertas/{aid:int}/veredicto", veredicto, methods=["POST"]),
+         Route("/api/alertas.csv", alertas_csv),
+         Route("/api/reiniciar", reiniciar, methods=["POST"]),
++        Route("/api/camaras/{cid}/pausa", pausa, methods=["POST"]),
+         Route("/aviso", aviso),
+         Route("/capturas/{nombre}", archivo_captura),
+         Route("/api/camaras/{cid}/zonas", zonas, methods=["GET", "PUT"]),
+diff --git a/web/static/app.js b/web/static/app.js
+index c46b429..a2a59f8 100644
+--- a/web/static/app.js
++++ b/web/static/app.js
+@@ -56,7 +56,24 @@ function pintarCamaras() {
+         estado.camaras = estado.camaras.filter((x) => x.id !== c.id);
+         tarjeta.remove();
+       };
+-      cab.append(quitar);
++      // Pausa: solo en videos subidos (y en el modo demo); una cámara en vivo no se detiene
++      const pausa = el("button", "pausa", "⏸"); pausa.hidden = true;
++      pausa.onclick = async () => {
++        const ahora = estado.camaras.find((x) => x.id === c.id) || {};
++        const quiere = ahora.terminado ? false : !ahora.pausado;     // terminado: ▶ lo vuelve a empezar
++        pausa.disabled = true;
++        try {
++          await api(`/api/camaras/${c.id}/pausa`, { method: "POST", body: JSON.stringify({ pausado: quiere }) });
++          const actual = estado.camaras.find((x) => x.id === c.id);
++          if (actual) { actual.pausado = quiere; if (!quiere) actual.terminado = false; }   // sin esperar al servidor
++          pintarCamaras();
++        } catch (e) {
++          alert(`No se pudo ${quiere ? "pausar" : "reanudar"} el video: ${e.message}`);
++        } finally {
++          pausa.disabled = false;
++        }
++      };
++      cab.append(pausa, quitar);
+       const video = el("div", "video");
+       const img = el("img"); img.alt = `Video de ${c.nombre}`;
+       // Cada cuadro se pide por separado en vez de mantener un video MJPEG abierto: el navegador solo admite
+@@ -74,9 +91,20 @@ function pintarCamaras() {
+       tarjeta.append(cab, video, el("div", "emociones"));
+       cont.append(tarjeta);
+     }
+-    tarjeta.querySelector(".meta").textContent = `${c.fps.toFixed(1)} fps · ${c.personas} personas`;
++    // un video subido se analiza completo aunque la PC sea lenta: entonces se ve en cámara lenta
++    const lento = c.velocidad != null && c.velocidad < 0.95 ? ` · cámara lenta ×${c.velocidad.toFixed(2)}` : "";
++    tarjeta.querySelector(".meta").textContent = c.terminado ? `video terminado · ${c.personas} personas`
++      : c.pausado ? `en pausa · ${c.personas} personas`
++      : `${c.fps.toFixed(1)} fps${lento} · ${c.personas} personas`;
++    const boton = tarjeta.querySelector(".pausa");
++    boton.hidden = !c.pausable;
++    boton.textContent = c.terminado ? "↻" : c.pausado ? "▶" : "⏸";
++    boton.title = c.terminado ? "Ver el video otra vez" : c.pausado ? "Reanudar el video" : "Pausar el video";
++    boton.classList.toggle("activa", !!(c.pausado || c.terminado));
+     const aviso = tarjeta.querySelector(".estado");
+-    aviso.textContent = c.error ? `Error: ${c.error}` : c.conectada ? "" : "Conectando con la cámara…";
++    aviso.textContent = c.error ? `Error: ${c.error}` : !c.conectada ? "Conectando con la cámara…"
++      : c.terminado ? "Fin del video · ↻ para verlo otra vez" : c.pausado ? "⏸ En pausa" : "";
++    aviso.classList.toggle("pausado", !c.error && c.conectada && !!(c.pausado || c.terminado));
+     aviso.hidden = !aviso.textContent;
+     const emo = tarjeta.querySelector(".emociones"); emo.replaceChildren();
+     const lista = Object.entries(c.emociones || {});
+diff --git a/web/static/style.css b/web/static/style.css
+index 713f71e..ae73961 100644
+--- a/web/static/style.css
++++ b/web/static/style.css
+@@ -57,9 +57,15 @@ button, input, select { font: inherit; color: inherit; }
+ .camara-cab h3 { margin: 0; font-size: 14px; }
+ .camara-cab .meta { color: var(--tenue); font-size: 12px; margin-left: auto; font-variant-numeric: tabular-nums; }
+ .camara-cab .quitar { background: none; border: 0; color: var(--tenue); cursor: pointer; font-size: 16px; }
++.camara-cab .pausa { background: none; border: 1px solid var(--borde); border-radius: 6px; color: #cdd3db; cursor: pointer;
++  font-size: 13px; line-height: 1; padding: 4px 8px; }
++.camara-cab .pausa:hover { border-color: var(--acento); }
++.camara-cab .pausa.activa { border-color: var(--acento); color: var(--acento); }
+ .video { position: relative; background: #050607; aspect-ratio: 16 / 9; }
+ .video img { width: 100%; height: 100%; object-fit: contain; display: block; }
+ .video .estado { position: absolute; inset: 0; display: grid; place-items: center; color: var(--tenue); text-align: center; padding: 20px; }
++.video .estado.pausado { inset: auto auto 10px 10px; padding: 4px 10px; border-radius: 6px; background: rgba(5, 6, 7, .75);
++  color: #fff; font-size: 13px; pointer-events: none; }
+ .emociones { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 12px 10px; min-height: 36px; }
+ .chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--borde); color: #cdd3db; }
+ 

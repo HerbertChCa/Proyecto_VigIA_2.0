@@ -1492,3 +1492,241 @@ class DuenoEnPantalla(unittest.TestCase):
             reglas.evaluar(obs, hist, ANCHO, ALTO, [])
             t += 0.1
         self.assertEqual(reglas.duenos(hist), {5: 3})
+
+
+class PausaDeVideo(unittest.TestCase):
+    """Pedido después de clase: poder pausar un video subido para explicar lo que está pasando."""
+
+    def _sistema(self, d):
+        from vigia.servidor import Sistema
+        cfg = copy.deepcopy(CFG)
+        cfg["camaras"] = []
+        return Sistema(cfg, Path(d), demo=True)
+
+    def _esperar(self, cond, maximo=5.0):
+        import time as _t
+        fin = _t.time() + maximo
+        while _t.time() < fin and not cond():
+            _t.sleep(0.05)
+        return cond()
+
+    def test_pausa_congela_imagen_y_reloj(self):
+        import time as _t
+        with tempfile.TemporaryDirectory() as d:
+            s = self._sistema(d)
+            try:
+                t = s.trabajadores["demo"]
+                self.assertTrue(self._esperar(lambda: t.jpeg is not None and t.estado.get("pausable")))
+                self.assertTrue(t.pausar(True))
+                self.assertTrue(t.estado["pausado"])
+                _t.sleep(0.3)                                # un cuadro que estuviera en curso termina
+                imagen, reloj = t.jpeg, t._reloj()
+                _t.sleep(0.6)
+                self.assertIs(t.jpeg, imagen)                # no se analiza ni se dibuja nada nuevo
+                self.assertAlmostEqual(t._reloj(), reloj, delta=0.01)   # el reloj del análisis está detenido
+                self.assertTrue(t.pausar(False))
+                self.assertFalse(t.estado["pausado"])
+                self.assertGreaterEqual(t._pausa_total, 0.8)  # el tiempo en pausa no cuenta para las reglas
+                self.assertTrue(self._esperar(lambda: t.jpeg is not imagen))
+            finally:
+                for t in s.trabajadores.values():
+                    t.detener()
+                s.alertas.cerrar()
+
+    def test_camara_en_vivo_no_se_pausa(self):
+        from vigia.camara import Trabajador
+
+        class LectorVivo:
+            finito, pausado, terminado = False, False, False
+
+            def detener(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as d:
+            s = self._sistema(d)
+            try:
+                t = s.trabajadores["demo"]
+                t.demo, t.lector = False, LectorVivo()       # como una cámara RTSP o una webcam
+                self.assertFalse(t.pausable)
+                self.assertFalse(t.pausar(True))
+                self.assertIsNone(t._pausa_desde)
+                t.lector.finito = True                       # un video subido sí
+                self.assertTrue(t.pausar(True))
+                self.assertTrue(t.lector.pausado)
+                t.pausar(False)
+                self.assertFalse(t.lector.pausado)
+                self.assertIsInstance(t, Trabajador)
+            finally:
+                for t in s.trabajadores.values():
+                    t.detener()
+                s.alertas.cerrar()
+
+    def test_ruta_de_pausa(self):
+        """La ruta se llama como lo haría el navegador (ASGI directo: no hace falta instalar httpx)."""
+        import asyncio
+        import json as _json
+        from vigia.servidor import crear_app
+
+        async def pedir(app, ruta, cuerpo=b""):
+            enviado, respuesta = False, {"cuerpo": b""}
+
+            async def recibir():
+                nonlocal enviado
+                if enviado:
+                    await asyncio.sleep(3600)
+                enviado = True
+                return {"type": "http.request", "body": cuerpo, "more_body": False}
+
+            async def enviar(m):
+                if m["type"] == "http.response.start":
+                    respuesta["estado"] = m["status"]
+                elif m["type"] == "http.response.body":
+                    respuesta["cuerpo"] += m.get("body", b"")
+            alcance = {"type": "http", "method": "POST", "path": ruta, "raw_path": ruta.encode(), "query_string": b"",
+                       "headers": [(b"content-type", b"application/json"), (b"host", b"localhost")],
+                       "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 8000), "scheme": "http",
+                       "root_path": "", "http_version": "1.1", "asgi": {"version": "3.0"}}
+            await app(alcance, recibir, enviar)
+            return respuesta["estado"], _json.loads(respuesta["cuerpo"] or b"{}")
+
+        async def probar(d):
+            cfg = copy.deepcopy(CFG)
+            cfg["camaras"] = []
+            app = crear_app(cfg, Path(d), demo=True)
+            async with app.router.lifespan_context(app):
+                sis = app.state.sistema
+                t = sis.trabajadores["demo"]
+                for _ in range(100):
+                    if t.estado.get("pausable"):
+                        break
+                    await asyncio.sleep(0.05)
+                try:
+                    estado, r = await pedir(app, "/api/camaras/demo/pausa", b'{"pausado": true}')
+                    self.assertEqual((estado, r["pausado"]), (200, True))
+                    self.assertTrue(t.estado["pausado"])
+                    estado, r = await pedir(app, "/api/camaras/demo/pausa")      # sin cuerpo: alterna
+                    self.assertEqual((estado, r["pausado"]), (200, False))
+                    estado, _ = await pedir(app, "/api/camaras/nada/pausa", b"{}")
+                    self.assertEqual(estado, 404)
+                finally:
+                    sis.alertas.cerrar()
+
+        with tempfile.TemporaryDirectory() as d:
+            asyncio.run(probar(d))
+
+
+class VideoSubidoACompas(unittest.TestCase):
+    """En clase, dos videos de 9 y 13 s no daban ninguna alerta: la PC analizaba 1.3 cuadros por segundo mientras el
+    video corría a su velocidad real, así que el tirón de la mochila (unos 2 s) caía entre dos cuadros y la mochila
+    nunca juntaba las 3 detecciones que pide el filtro. Ahora el video avanza al ritmo del análisis."""
+
+    FPS = 60
+
+    def _video(self, d, segundos=2.0):
+        import cv2
+        ruta = str(Path(d) / "prueba.mp4")
+        w = cv2.VideoWriter(ruta, cv2.VideoWriter_fourcc(*"mp4v"), self.FPS, (160, 120))
+        for i in range(int(segundos * self.FPS)):
+            f = np.zeros((120, 160, 3), np.uint8)
+            f[:, :] = i % 250                                 # el brillo dice qué cuadro es
+            w.write(f)
+        w.release()
+        return ruta
+
+    def _esperar(self, cond, maximo=5.0):
+        import time as _t
+        fin = _t.time() + maximo
+        while _t.time() < fin and not cond():
+            _t.sleep(0.01)
+        return cond()
+
+    def _tomar(self, lector):
+        caja = {}
+        self.assertTrue(self._esperar(lambda: caja.setdefault("x", lector.tomar()) is not None
+                                      or caja.pop("x") is not None))
+        return caja["x"]
+
+    def test_entrega_diez_cuadros_por_segundo_de_video_sin_saltarse_ninguno(self):
+        import time as _t
+        from vigia.camara import Lector
+        with tempfile.TemporaryDirectory() as d:
+            lector = Lector(self._video(d), fps_analisis=10)
+            try:
+                tiempos = []
+                for _ in range(5):
+                    _, t = self._tomar(lector)
+                    tiempos.append(t)
+                    _t.sleep(0.3)                             # un análisis lento (como en la PC de clase)
+                pasos = np.diff(tiempos)
+                self.assertTrue(np.allclose(pasos, 0.1, atol=0.02), pasos)   # 0.1 s de video por cuadro, siempre
+                self.assertAlmostEqual(lector.paso_video, 0.1, places=2)
+            finally:
+                lector.detener()
+
+    def test_al_terminar_queda_quieto_y_se_puede_repetir(self):
+        from vigia.camara import Lector
+        with tempfile.TemporaryDirectory() as d:
+            lector = Lector(self._video(d, segundos=1.0), fps_analisis=10)
+            try:
+                ultimo = 0.0
+                while not lector.terminado:
+                    r = lector.tomar()
+                    if r is not None:
+                        ultimo = r[1]
+                    self._esperar(lambda: lector.terminado or not lector._tomado, 2.0)
+                self.assertAlmostEqual(ultimo, 1.0, delta=0.15)
+                self.assertIsNone(lector.tomar())             # no vuelve a empezar solo
+                lector.rebobinar()
+                _, t = self._tomar(lector)
+                self.assertEqual(lector.vuelta, 1)
+                self.assertGreater(t, ultimo)                 # el reloj del análisis nunca va hacia atrás
+            finally:
+                lector.detener()
+
+    def test_el_analisis_usa_el_segundo_del_video(self):
+        """El trabajador toma la hora del video (no la del reloj) y, si el video vuelve a empezar, olvida la vuelta
+        anterior pero conserva las falsas alarmas marcadas por el operador."""
+        from vigia.camara import Lector
+        from vigia.servidor import Sistema
+
+        class Detector:
+            vistos: list = []
+            cada_n = None
+            reinicios = 0
+
+            def procesar(self, frame, t):
+                self.vistos.append(t)
+                return Observacion(t=t)
+
+            def reiniciar_seguimiento(self):
+                self.reinicios += 1
+
+        class SinRostros:
+            disponible = False
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = copy.deepcopy(CFG)
+            cfg["camaras"] = []
+            s = Sistema(cfg, Path(d), demo=True)
+            t = s.trabajadores["demo"]
+            try:
+                t._parar = True                               # se maneja a mano, cuadro por cuadro
+                t.demo, t.sim = False, None
+                t.detector, t.rostros = Detector(), SinRostros()
+                t.lector = Lector(self._video(d, segundos=1.0), fps_analisis=10)
+                t.reglas.ignorar = [[1, 1, 5, 5]]
+                for _ in range(4):
+                    self._esperar(lambda: not t.lector._tomado)
+                    t._paso()
+                self.assertTrue(np.allclose(t.detector.vistos, [0.1, 0.2, 0.3, 0.4], atol=0.02), t.detector.vistos)
+                self.assertEqual(t.detector.cada_n, 2)
+                self.assertIsNotNone(t.estado["velocidad"])
+                t.lector.rebobinar()
+                self.assertTrue(self._esperar(lambda: t.lector.vuelta == 1 and not t.lector._tomado))
+                t._paso()
+                self.assertEqual(t.detector.reinicios, 1)
+                self.assertEqual(t.reglas.ignorar, [[1, 1, 5, 5]])
+            finally:
+                if t.lector:
+                    t.lector.detener()
+                s.alertas.cerrar()

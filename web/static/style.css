@@ -57,9 +57,15 @@ button, input, select { font: inherit; color: inherit; }
 .camara-cab h3 { margin: 0; font-size: 14px; }
 .camara-cab .meta { color: var(--tenue); font-size: 12px; margin-left: auto; font-variant-numeric: tabular-nums; }
 .camara-cab .quitar { background: none; border: 0; color: var(--tenue); cursor: pointer; font-size: 16px; }
+.camara-cab .pausa { background: none; border: 1px solid var(--borde); border-radius: 6px; color: #cdd3db; cursor: pointer;
+  font-size: 13px; line-height: 1; padding: 4px 8px; }
+.camara-cab .pausa:hover { border-color: var(--acento); }
+.camara-cab .pausa.activa { border-color: var(--acento); color: var(--acento); }
 .video { position: relative; background: #050607; aspect-ratio: 16 / 9; }
 .video img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .video .estado { position: absolute; inset: 0; display: grid; place-items: center; color: var(--tenue); text-align: center; padding: 20px; }
+.video .estado.pausado { inset: auto auto 10px 10px; padding: 4px 10px; border-radius: 6px; background: rgba(5, 6, 7, .75);
+  color: #fff; font-size: 13px; pointer-events: none; }
 .emociones { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 12px 10px; min-height: 36px; }
 .chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--borde); color: #cdd3db; }
 
