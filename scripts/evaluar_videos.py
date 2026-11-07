@@ -50,6 +50,7 @@ sys.path.insert(0, str(RAIZ))
 
 from vigia.alertas import NOMBRES  # noqa: E402
 from vigia.historial import Historial  # noqa: E402
+from vigia.objetos import FiltroObjetos  # noqa: E402
 from vigia.reglas import Reglas  # noqa: E402
 
 EXTENSIONES = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v", ".mpg", ".mpeg"}
@@ -115,6 +116,8 @@ def analizar_video(ruta: Path, cfg: dict, detector, fps: float) -> dict:
         fps_video = 30
     paso = max(1, round(fps_video / fps))
     reglas, hist, zonas = Reglas(cfg["reglas"]), Historial(), zonas_de(ruta)
+    from vigia.modelos import modelo_abierto
+    filtro = FiltroObjetos(abierto=modelo_abierto(cfg["modelos"]) is not None)   # igual que una cámara en vivo
     eventos, vistos, i, t_mod, n_mod, ancho_max = [], set(), 0, 0.0, 0, cfg["procesamiento"]["ancho_max"]
     while True:
         ok, frame = cap.read()
@@ -129,6 +132,7 @@ def analizar_video(ruta: Path, cfg: dict, detector, fps: float) -> dict:
             obs = detector.procesar(frame, t)
             t_mod += time.perf_counter() - t0
             n_mod += 1
+            obs.objetos = filtro.filtrar(obs.objetos, t, cfg["reglas"]["objetos"], obs.personas)
             hist.actualizar(obs)
             h, w = frame.shape[:2]
             for ev in reglas.evaluar(obs, hist, w, h, zonas):

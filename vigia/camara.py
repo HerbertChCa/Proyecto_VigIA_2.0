@@ -100,7 +100,8 @@ class Trabajador:
         self.zonas = zonas
         self.demo = demo or str(self.fuente) == "demo"
         self.hist = Historial()
-        self.filtro = FiltroObjetos()
+        from .modelos import modelo_abierto
+        self.filtro = FiltroObjetos(abierto=modelo_abierto(cfg["modelos"]) is not None)
         self.reglas = Reglas(cfg["reglas"])
         self.jpeg: Optional[bytes] = None
         self.crudo: Optional[np.ndarray] = None   # último frame sin anotaciones (ya difuminado)
@@ -109,6 +110,7 @@ class Trabajador:
         self._en_alerta: dict[int, float] = {}
         self._tiempos: deque = deque(maxlen=20)
         self._parar = False
+        self._reiniciar = False
         self._t0 = time.time()
         self.lector = None
         self.sim = None
@@ -145,7 +147,21 @@ class Trabajador:
                 time.sleep(1)
             time.sleep(max(0.0, periodo - (time.time() - inicio)))
 
+    def reiniciar(self) -> None:
+        """Olvida lo aprendido de la escena (personas, objetos, escenario, falsas alarmas). Lo aplica el propio
+        hilo de la cámara en su siguiente cuadro, para no cambiar el estado mientras lo está usando."""
+        self._reiniciar = True
+
+    def _aplicar_reinicio(self) -> None:
+        self.hist = Historial()
+        self.filtro = FiltroObjetos(abierto=self.filtro.abierto)
+        self.reglas = Reglas(self.cfg["reglas"])
+        self._en_alerta.clear()
+        self._reiniciar = False
+
     def _paso(self):
+        if self._reiniciar:
+            self._aplicar_reinicio()
         priv = self.cfg["privacidad"]
         if self.demo:
             t = time.time() - self._t0
@@ -172,7 +188,7 @@ class Trabajador:
 
         h, w = frame.shape[:2]
         if not self.demo:            # los objetos del modo demo ya vienen limpios
-            obs.objetos = self.filtro.filtrar(obs.objetos, t, self.cfg["reglas"]["objetos"])
+            obs.objetos = self.filtro.filtrar(obs.objetos, t, self.cfg["reglas"]["objetos"], obs.personas)
         self.hist.actualizar(obs)
         eventos = self.reglas.evaluar(obs, self.hist, w, h, self.zonas)
         ahora = time.time()
@@ -203,7 +219,7 @@ class Trabajador:
             enc += "  |  MODO DEMO (escena simulada)"
         if esqueleto:
             enc += "  |  SOLO ESQUELETO"
-        dibujar(frame, obs, self.zonas, en_alerta, emociones, enc, grueso=esqueleto)
+        dibujar(frame, obs, self.zonas, en_alerta, emociones, enc, grueso=esqueleto, duenos=self.reglas.duenos(self.hist))
         self.alertas.procesar(self.id, eventos, frame)
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
         if ok:

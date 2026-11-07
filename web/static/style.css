@@ -40,6 +40,8 @@ button, input, select { font: inherit; color: inherit; }
 .btn { background: var(--panel-2); border: 1px solid var(--borde); border-radius: 8px; padding: 7px 12px; cursor: pointer; }
 .btn:hover { border-color: #3a4350; }
 .btn.primario { background: var(--acento); border-color: var(--acento); color: #06201d; font-weight: 600; }
+.btn.peligro { border-color: var(--alta); color: var(--alta); }
+.btn.peligro:hover { background: var(--alta); color: #fff; }
 .btn.chico { padding: 4px 9px; font-size: 12px; }
 
 .aviso { margin: 14px 20px 0; padding: 10px 14px; border: 1px solid #3d4a3a; background: #18221a;

@@ -160,8 +160,11 @@ ve la escena.
   considera parte del escenario.
 - **El operador enseña.** Marcar como **Falsa alarma** una alerta de objeto abandonado, hurto o robo de vehículo hace
   que ese objeto, en ese lugar de la imagen, no vuelva a alertar. Se guarda en `datos/ignorar.json`.
-- **Alertas agrupadas.** Si la misma situación (cámara, tipo y severidad) se repite en menos de 60 s mientras la
-  alerta sigue pendiente, se suma a ella con un contador «×N» en lugar de crear otra fila (`alertas.agrupar`).
+- **Alertas agrupadas.** Si la misma situación (cámara, tipo y severidad) se repite en menos de 20 s mientras la
+  alerta sigue pendiente, se suma a ella con un contador «×N» y la tarjeta vuelve al inicio de la lista
+  (`alertas.agrupar`). En modo feria no se agrupan: cada intento del reto es su propia alerta.
+- **Borrar historial.** El botón del panel borra las alertas y sus fotos y reinicia lo aprendido de la escena
+  (escenario y falsas alarmas). Úselo entre una prueba y otra; las cámaras, zonas y ajustes se conservan.
 - **Merodeo sin zonas, opcional.** Medir el merodeo en toda la cámara cuando no hay zonas está apagado por defecto,
   porque en una tienda o un pasillo cualquiera se queda más de un minuto. Se activa en Ajustes.
 
@@ -187,6 +190,20 @@ python scripts/evaluar_videos.py --datos evaluacion --operador datos/alertas.db
 Escribe `ficha_videos.md`, lista para el informe, y `resultados_videos.csv` con el detalle de cada video. Con
 `--operador` agrega la precisión observada con los veredictos del panel (uso real). Con pocos videos por regla los
 intervalos son amplios: reporte siempre la cifra con su intervalo y el número de videos.
+
+## Diagnosticar una prueba que falló
+
+Si una prueba no dio la alerta esperada, pase el video grabado por `scripts/diagnosticar_video.py`. Usa el mismo
+flujo que una cámara y explica qué vio VigIA: si detectó la mochila y con qué confianza, quién la llevaba en cada
+momento, si hubo cuerpo a cuerpo, la velocidad de las extremidades y cuánto se movió la cámara.
+
+```bat
+python scripts\diagnosticar_video.py VID_20261105_155016.mp4
+```
+
+Deja en `diagnostico/` el video anotado y un CSV con una fila por cuadro. **Grabe las pruebas con el celular
+quieto** (apoyado o en un trípode): con la cámara en la mano las zonas dejan de coincidir con el piso y las
+velocidades de las personas en la imagen no son las reales.
 
 ## Evaluación con RWF-2000
 
@@ -266,7 +283,14 @@ vigia/
   evaluación antes de afirmar cifras de desempeño.
 - Abrazos, juegos bruscos o bailes cerca de otra persona pueden parecer peleas; agacharse a recoger algo puede
   parecer una caída si dura poco. Ajuste umbrales y tiempos según el lugar.
-- El posible hurto depende de que el seguidor mantenga el ID del objeto; si el objeto se tapa por completo, se pierde.
+- El posible hurto depende de que el detector vea el objeto: una mochila de espaldas, tapada por el cuerpo o
+  movida muy rápido puede no detectarse. El arrebato (quitarle a alguien lo que lleva encima) se sigue aunque el
+  objeto cambie de número, pero no si deja de verse por completo antes del tirón.
+- La ropa solo se reconoce con el detector de vocabulario abierto (`python scripts/preparar_vocabulario.py`); el de
+  COCO no tiene esa clase. Una prenda se vigila si alguien la trae en la mano y en movimiento; la de un perchero o
+  un escaparate es parte del lugar y no alerta.
+- El forcejeo se reconoce por los cuerpos juntos con empujones; un abrazo quieto no alerta, pero un juego brusco
+  o un baile pegado sí pueden hacerlo. Cada alerta debe revisarse en la captura.
 - Con iluminación baja, oclusiones fuertes o personas muy lejanas (menos de unos 60 píxeles de alto) la pose
   se degrada, como advierte la literatura revisada.
 - La detección de armas usa las clases «knife» y «baseball bat» del modelo COCO: a distancia o con poca luz confunde
@@ -285,6 +309,7 @@ vigia/
 | La cámara IP no conecta | Pruebe la URL en VLC (Medio → Abrir ubicación de red); verifique usuario, clave y que esté en la misma red |
 | No aparecen emociones | Faltan los modelos ONNX: ejecute `python scripts/descargar_modelos.py` |
 | Error al instalar `torch` | Use Python 3.10, 3.11 o 3.12 |
+| La mochila o la prenda aparece y desaparece | Encuadre a la persona entera a 3-5 m, con buena luz y la cámara quieta; si la PC aguanta, ponga `objetos_cada_n_frames: 2`. Revise con `scripts/diagnosticar_video.py` qué confianza le da el detector |
 
 ## Créditos
 

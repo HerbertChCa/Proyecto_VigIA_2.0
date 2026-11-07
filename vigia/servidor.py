@@ -27,6 +27,7 @@ from .camara import Trabajador
 from .descargas import PAGINAS_DE_VIDEO, Descargas
 from .descargas import disponible as descargas_disponibles
 from .encuesta import LIKERT, PREGUNTAS, Encuesta
+from .modelos import nombres_objetos
 from .reto import RETOS, TIEMPOS_FERIA, Marcador
 
 TIPOS_ZONA = ("restringida", "merodeo", "protegida")
@@ -107,11 +108,15 @@ class Sistema:
         if self._f_ajustes.exists():
             _mezclar(self.cfg, json.loads(self._f_ajustes.read_text(encoding="utf-8")))
         self.zonas: dict[str, list] = json.loads(self._f_zonas.read_text(encoding="utf-8")) if self._f_zonas.exists() else {}
+        clases = self.cfg["reglas"]["objetos"].setdefault("clases", {})
+        for nombre in nombres_objetos(self.cfg["modelos"]):
+            clases.setdefault(nombre, True)
         if feria:                                 # retos de segundos, no de minutos
             for ruta, valor in TIEMPOS_FERIA.items():
                 regla, clave = ruta.split(".")
                 self.cfg["reglas"][regla][clave] = valor
             self.cfg["alertas"]["enfriamiento"] = 5
+            self.cfg["alertas"]["agrupar"] = 0    # cada intento del reto es su propia alerta, no un «×2» en la anterior
         self.alertas = GestorAlertas(datos, self.cfg["alertas"]["enfriamiento"], self.cfg["alertas"].get("agrupar", 0))
         self._f_ignorar = datos / "ignorar.json"
         self.ignorados: dict[str, list] = (json.loads(self._f_ignorar.read_text(encoding="utf-8"))
@@ -151,6 +156,19 @@ class Sistema:
             t.reglas.aprender_ignorar(cajas[0])
             self.ignorados[camara] = t.reglas.ignorar
             self._f_ignorar.write_text(json.dumps(self.ignorados, indent=1), encoding="utf-8")
+
+    def reiniciar(self) -> int:
+        """Botón «Borrar historial»: borra las alertas y sus fotos y hace que cada cámara olvide lo aprendido de la
+        escena (objetos tomados como escenario y lugares marcados como falsa alarma). Las cámaras, las zonas y los
+        ajustes se conservan. Devuelve cuántas alertas se borraron."""
+        n = self.alertas.borrar_todo()
+        self.buscador.vaciar()
+        for t in self.trabajadores.values():
+            t.reglas.ignorar = []
+            t.reiniciar()
+        self.ignorados = {}
+        self._f_ignorar.unlink(missing_ok=True)
+        return n
 
     def agregar_camara(self, cam: dict, guardar: bool = True) -> None:
         if isinstance(cam.get("fuente"), str):        # también corrige las ya guardadas con https://IP:8080
@@ -474,6 +492,9 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
             return JSONResponse({"error": "esa cámara ya no existe; recargue la página"}, status_code=404)
         return JSONResponse({"ok": True})
 
+    async def reiniciar(_):
+        return JSONResponse({"ok": True, "borradas": sis.reiniciar()})
+
     async def ajustes(req: Request):
         if req.method == "PUT":
             sis.aplicar_ajustes(await req.json())
@@ -490,6 +511,7 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
         Route("/api/alertas/{aid:int}/atender", atender, methods=["POST"]),
         Route("/api/alertas/{aid:int}/veredicto", veredicto, methods=["POST"]),
         Route("/api/alertas.csv", alertas_csv),
+        Route("/api/reiniciar", reiniciar, methods=["POST"]),
         Route("/aviso", aviso),
         Route("/capturas/{nombre}", archivo_captura),
         Route("/api/camaras/{cid}/zonas", zonas, methods=["GET", "PUT"]),

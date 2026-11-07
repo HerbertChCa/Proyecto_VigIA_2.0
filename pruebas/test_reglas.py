@@ -1,5 +1,6 @@
 """Pruebas de las reglas y del gestor de alertas. Ejecutar: python -m unittest discover pruebas"""
 import copy
+import math
 import sys
 import tempfile
 import unittest
@@ -1057,3 +1058,437 @@ class FiltroDeObjetos(unittest.TestCase):
         for i in range(6):                       # el mismo objeto devuelto en 6 cuadros sin detección nueva
             salida = f.filtrar([o], i * 0.1)
         self.assertEqual(salida, [])
+
+
+class VocabularioAbierto(unittest.TestCase):
+    """Detector que reconoce objetos por su nombre (YOLO-World). Se prueba con un YOLO simulado."""
+
+    def detector(self, nombres, detecciones, tmp):
+        import types
+        from vigia import modelos
+
+        class Arr(np.ndarray):          # imita los tensores de ultralytics: .cpu().numpy(), .int(), .tolist()
+            def cpu(self): return self
+            def numpy(self): return np.asarray(self)
+            def int(self): return Arr.de(np.asarray(self).astype(int))
+            def tolist(self): return np.asarray(self).tolist()
+            @staticmethod
+            def de(a): return np.asarray(a).view(Arr)
+
+        class Res:
+            def __init__(self, filas):
+                self.keypoints = None
+                if not filas:
+                    self.boxes = types.SimpleNamespace(id=None)
+                    return
+                self.boxes = types.SimpleNamespace(
+                    xyxy=Arr.de([f[2] for f in filas]).astype(float).view(Arr), id=Arr.de([f[0] for f in filas]),
+                    cls=Arr.de([f[1] for f in filas]), conf=Arr.de([f[3] for f in filas]).astype(float).view(Arr))
+
+        class YOLOFalso:
+            def __init__(self, ruta):
+                self.ruta, self.names = ruta, ({i: n for i, n in enumerate(nombres)} if "vocab" in ruta else {})
+            def track(self, frame, **kw):
+                self.kw = kw
+                return [Res([] if "pose" in self.ruta else detecciones)]
+        sys.modules["ultralytics"] = types.SimpleNamespace(YOLO=YOLOFalso)
+        try:
+            ruta = Path(tmp) / "vigia-vocabulario.pt"
+            ruta.write_bytes(b"x")
+            cfg = dict(CFG["modelos"], objetos_abierto=str(ruta), pose="pose.pt")
+            det = modelos.DetectorYOLO(cfg)
+            return det, det.procesar(np.zeros((10, 10, 3), np.uint8), 0.0)
+        finally:
+            del sys.modules["ultralytics"]
+
+    def test_nombres_en_espanol_y_sin_personas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            det, obs = self.detector(["person", "clothes", "sack", "tablet"],
+                                     [(1, 0, [0, 0, 5, 5], 0.9), (2, 1, [1, 1, 4, 4], 0.4),
+                                      (3, 2, [2, 2, 6, 6], 0.5), (4, 3, [3, 3, 7, 7], 0.6)], tmp)
+        self.assertTrue(det.abierto)
+        self.assertEqual(sorted(o.clase for o in obs.objetos), ["ropa", "saco", "tablet"])
+        self.assertIsNone(det.obj.kw["classes"])                  # busca todo su vocabulario
+        from vigia.modelos import SEGUIDOR_OBJETOS
+        self.assertEqual(det.obj.kw["tracker"], SEGUIDOR_OBJETOS)  # seguidor que acepta confianza baja
+        self.assertEqual(det.obj.kw["imgsz"], CFG["modelos"]["tamano_imagen_objetos"])
+
+    def test_sin_el_archivo_usa_coco(self):
+        from vigia.modelos import CLASES_OBJETO, modelo_abierto, nombres_objetos
+        cfg = dict(CFG["modelos"], objetos_abierto="models/no-existe.pt")
+        self.assertIsNone(modelo_abierto(cfg))
+        self.assertEqual(set(nombres_objetos(cfg)), set(CLASES_OBJETO.values()))
+
+    def test_las_casillas_de_ajustes_siguen_al_vocabulario(self):
+        from vigia.modelos import nombres_objetos
+        with tempfile.TemporaryDirectory() as tmp:
+            ruta = Path(tmp) / "v.pt"
+            ruta.write_bytes(b"x")
+            nombres = nombres_objetos(dict(CFG["modelos"], objetos_abierto=str(ruta)))
+        self.assertIn("ropa", nombres)
+        self.assertIn("saco", nombres)
+        self.assertNotIn("persona", nombres)
+
+    def test_la_ropa_puesta_no_es_un_objeto(self):
+        from vigia.objetos import FiltroObjetos
+        from vigia.tipos import Objeto
+        f, g = FiltroObjetos(abierto=True), FiltroObjetos(abierto=True)    # un filtro por escena, como una cámara
+        persona = Persona(1, np.array([100, 100, 200, 400.0]))
+        for i in range(5):
+            puesta = f.filtrar([Objeto(9, "ropa", np.array([110, 150, 190, 300.0]), 0.6)], i * 0.4, {}, [persona])
+            colgada = g.filtrar([Objeto(8, "ropa", np.array([400, 100, 480, 250.0]), 0.6)], i * 0.4, {}, [persona])
+        self.assertEqual(puesta, [])
+        self.assertEqual([o.clase for o in colgada], ["ropa"])
+
+
+# --------------------------------------------------------------------------- pruebas en clase (noviembre 2026)
+def _con_munecas_tapadas(pid, k):
+    """En un forcejeo las manos quedan detrás del cuerpo del otro: la pose no las ve (confianza baja)."""
+    from vigia.simulador import _caja
+    conf = np.full(17, 0.9)
+    conf[[9, 10]] = 0.1
+    return Persona(pid, _caja(k), k, conf)
+
+
+class ForcejeoYDerribo(unittest.TestCase):
+    """Video de la clase: dos personas forcejean cuerpo a cuerpo sin golpes rápidos y una termina en el suelo.
+    Antes solo se detectaba la caída; la regla de violencia pedía golpes a más de 1.8 alturas/s."""
+
+    def escena(self, x_a, x_b, segundos=6.0, cae_desde=None):
+        from vigia.simulador import H
+
+        def cuadros(t):
+            a = esqueleto(x_a(t), 480, "quieto", t, 0, 1, 0)
+            if cae_desde is not None and t >= cae_desde:
+                prog = min(1.0, (t - cae_desde) / 0.7)
+                b = esqueleto(x_b(cae_desde), 480, "cae" if prog < 1 else "tendido", t, 0, 1, prog)
+            else:
+                b = esqueleto(x_b(t), 480, "quieto", t, 0, -1, 0)
+            return [_con_munecas_tapadas(1, a), _con_munecas_tapadas(2, b)], []
+        return recorrer_escena(cuadros, segundos)
+
+    def test_forcejeo_sin_golpes_es_violencia(self):
+        from vigia.simulador import H
+        ev = self.escena(lambda t: 400 + 0.06 * H * math.sin(2 * math.pi * 1.2 * t),
+                         lambda t: 400 + 0.08 * H - 0.06 * H * math.sin(2 * math.pi * 1.2 * t), segundos=4)
+        v = [e for e in ev if e.tipo == "violencia"]
+        self.assertTrue(v and "forcejeo" in v[0].mensaje)
+
+    def test_abrazo_quieto_no_es_violencia(self):
+        from vigia.simulador import H
+        ev = self.escena(lambda t: 400.0, lambda t: 400 + 0.08 * H + 0.004 * H * math.sin(9 * t), segundos=6)
+        self.assertFalse([e for e in ev if e.tipo == "violencia"])
+
+    def test_caminar_juntos_no_es_violencia(self):
+        from vigia.simulador import H
+
+        def cuadros(t):
+            x = 200 + 0.7 * H * t
+            a = esqueleto(x, 480, "camina", t, x, 1, 0)
+            b = esqueleto(x + 0.1 * H, 485, "camina", t, x, 1, 0)
+            return [persona(1, a), persona(2, b)], []
+        self.assertFalse([e for e in recorrer_escena(cuadros, 3.5) if e.tipo == "violencia"])
+
+    def test_derribo_tras_el_forcejeo(self):
+        from vigia.simulador import H
+        ev = self.escena(lambda t: 400 + 0.06 * H * math.sin(2 * math.pi * 1.2 * t),
+                         lambda t: 400 + 0.08 * H - 0.06 * H * math.sin(2 * math.pi * 1.2 * t),
+                         segundos=7, cae_desde=3.0)
+        self.assertIn("caida", [e.tipo for e in ev])
+        derribo = [e for e in ev if e.clave.startswith("violencia:derribo")]
+        self.assertTrue(derribo and "#1 derribó a #2" in derribo[0].mensaje)
+
+    def test_caerse_solo_no_es_agresion(self):
+        def cuadros(t):
+            prog = min(1.0, max(0.0, (t - 3.0) / 0.7))
+            b = esqueleto(400, 480, "quieto" if t < 3 else ("cae" if prog < 1 else "tendido"), t, 0, 1, prog)
+            a = esqueleto(800, 480, "quieto", t, 0, -1, 0)
+            return [persona(1, a), persona(2, b)], []
+        ev = recorrer_escena(cuadros, 7)
+        self.assertIn("caida", [e.tipo for e in ev])
+        self.assertFalse([e for e in ev if e.tipo == "violencia"])
+
+
+class Arrebato(unittest.TestCase):
+    """Videos de la clase: le quitan la mochila a alguien que la lleva puesta o en la mano. La regla de hurto
+    solo vigilaba objetos que quedaron quietos, así que estos casos nunca daban alerta."""
+
+    def escena(self, mochila_de, segundos=9.0, camara=lambda t: 0.0, oid_tras_tiron=None, clase="mochila"):
+        """mochila_de(t) -> 'a', 'b', 'ambos' o None; la víctima #1 queda quieta en x=400 y el ladrón #2 llega
+        desde la derecha y huye hacia la derecha. camara(t) desplaza toda la imagen (un celular que sigue al ladrón)."""
+        from vigia.simulador import H
+        from vigia.tipos import Objeto
+
+        def x_ladron(t):
+            if t < 4:
+                return 820 - 50 * t
+            if t < 6.5:
+                return 400 + 0.45 * H
+            return 400 + 0.45 * H + 2.2 * H * (t - 6.5)
+
+        def cuadros(t):
+            dx = -camara(t)
+            xa, xb = 400 + dx, x_ladron(t) + dx
+            a = esqueleto(xa, 480, "quieto", t, 0, 1, 0)
+            b = esqueleto(xb, 480, "golpea" if 4 <= t < 6.5 else ("quieto" if t < 4 else "camina"), t, xb, -1, 0)
+            pa, pb = persona(1, a), persona(2, b)
+            quien = mochila_de(t)
+            objetos = []
+            if quien == "a" and clase == "ropa":   # una casaca en la mano de la víctima
+                w = pa.punto(9)
+                c = np.array([w[0] - 0.08 * H, w[1] - 0.02 * H, w[0] + 0.08 * H, w[1] + 0.30 * H])
+            elif quien == "a":                     # a la espalda de la víctima
+                c = np.array([xa - 0.10 * H, 480 - 0.78 * H, xa + 0.03 * H, 480 - 0.50 * H])
+            elif quien == "ambos":                 # entre los dos, sujetada por las manos de ambos
+                m = (pa.punto(9) + pb.punto(10)) / 2 if pb.punto(10) is not None else pa.punto(9)
+                c = np.array([m[0] - 0.07 * H, m[1] - 0.10 * H, m[0] + 0.07 * H, m[1] + 0.10 * H])
+            elif quien == "b":                     # en la mano del ladrón
+                w = pb.punto(9)
+                c = np.array([w[0] - 0.07 * H, w[1], w[0] + 0.07 * H, w[1] + 0.2 * H])
+            if quien:
+                oid = oid_tras_tiron if (oid_tras_tiron and quien == "b") else 70
+                objetos.append(Objeto(oid, clase, c))
+            return [pa, pb], objetos
+        return [e for e in recorrer_escena(cuadros, segundos) if e.tipo == "hurto"]
+
+    @staticmethod
+    def tiron(t):
+        return "a" if t < 5 else ("ambos" if t < 6.5 else "b")
+
+    def test_le_quitan_la_mochila_que_lleva_puesta(self):
+        h = self.escena(self.tiron)
+        self.assertTrue(h, "el arrebato no generó alerta")
+        self.assertIn("arrebato", h[0].mensaje)
+        self.assertIn("#2 le quitó una mochila a la persona #1", h[0].mensaje)
+        self.assertEqual(h[0].severidad, "alta")           # hubo forcejeo
+
+    def test_la_mochila_cambia_de_numero_en_el_tiron(self):
+        self.assertTrue(self.escena(self.tiron, oid_tras_tiron=71))
+
+    def test_con_la_camara_siguiendo_al_ladron(self):
+        from vigia.simulador import H
+        sigue = lambda t: 0.0 if t < 6.5 else 2.2 * H * (t - 6.5)      # el ladrón queda quieto en la imagen
+        self.assertTrue(self.escena(self.tiron, camara=sigue))
+
+    def test_se_la_muestra_y_se_la_devuelve(self):
+        self.assertEqual(self.escena(lambda t: "a" if t < 5 or t >= 6.5 else "ambos"), [])
+
+    def test_la_lleva_su_dueno_todo_el_tiempo(self):
+        self.assertEqual(self.escena(lambda t: "a"), [])
+
+
+class HuidaConCamaraEnMovimiento(unittest.TestCase):
+    def test_toca_y_huye_aunque_la_camara_lo_siga(self):
+        from vigia.simulador import H
+
+        def cuadros(t):
+            pan = 0.0 if t < 1.5 else 2.5 * H * (t - 1.5)                 # el celular sigue al que huye
+            if t < 1.5:
+                a = esqueleto(400, 480, "golpea", t, 0, 1, 0)
+            else:
+                a = esqueleto(400 - 2.5 * H * (t - 1.5) + pan, 480, "camina", t, t * 300, -1, 0)
+            v = esqueleto(400 + 0.6 * H + pan, 480, "quieto", t, 0, -1, 0)
+            return [persona(1, a), persona(2, v)], []
+        ev = [e for e in recorrer_escena(cuadros, 4.0) if e.tipo == "robo_huida"]
+        self.assertTrue(ev and "#1 tocó a #2" in ev[0].mensaje)
+
+
+class MochilaPuestaAlArrancar(unittest.TestCase):
+    def test_no_es_parte_del_escenario(self):
+        from vigia.simulador import H
+        from vigia.tipos import Objeto
+        reglas, hist, t = Reglas(copy.deepcopy(CFG["reglas"])), Historial(), 0.0
+        while t < 3:
+            k = esqueleto(400, 480, "quieto", t, 0, 1, 0)
+            mochila = Objeto(5, "mochila", np.array([400 - 0.10 * H, 480 - 0.78 * H, 400 + 0.03 * H, 480 - 0.50 * H]))
+            obs = Observacion(t=t, personas=[persona(1, k)], objetos=[mochila])
+            hist.actualizar(obs)
+            reglas.evaluar(obs, hist, ANCHO, ALTO, [])
+            t += 0.1
+        self.assertEqual(hist.objetos[5].estado["origen"], "nuevo")
+        self.assertEqual(hist.objetos[5].estado["dueno"], 1)
+
+
+class BorrarHistorial(unittest.TestCase):
+    """En clase faltaba un botón para empezar de cero entre una prueba y otra."""
+
+    def test_borra_alertas_fotos_y_enfriamiento(self):
+        with tempfile.TemporaryDirectory() as d:
+            g = GestorAlertas(Path(d), enfriamiento=30, agrupar=20)
+            frame = np.zeros((60, 80, 3), np.uint8)
+            ev = Evento("hurto", "alta", "m", "x 1", "hurto:1:2", [[1, 1, 9, 9]])
+            g.procesar("cam1", [ev], frame)
+            self.assertEqual(len(list((Path(d) / "capturas").glob("*.jpg"))), 1)
+            self.assertEqual(g.borrar_todo(), 1)
+            self.assertEqual(g.listar(), [])
+            self.assertEqual(list((Path(d) / "capturas").glob("*.jpg")), [])
+            nueva = g.procesar("cam1", [ev], frame)          # la misma alerta vuelve a salir enseguida
+            self.assertEqual(nueva[0]["id"], 1)
+            g.cerrar()
+
+    def test_el_sistema_olvida_lo_aprendido(self):
+        from vigia.servidor import Sistema
+        with tempfile.TemporaryDirectory() as d:
+            cfg = copy.deepcopy(CFG)
+            cfg["camaras"] = []
+            s = Sistema(cfg, Path(d), demo=True)
+            try:
+                t = s.trabajadores["demo"]
+                s._descartar("demo", "hurto", [[600, 430, 640, 470]])
+                self.assertTrue((Path(d) / "ignorar.json").exists())
+                reglas_antes = t.reglas
+                s.reiniciar()
+                self.assertFalse((Path(d) / "ignorar.json").exists())
+                import time as _t
+                for _ in range(50):                          # lo aplica el hilo de la cámara en su próximo cuadro
+                    if t.reglas is not reglas_antes:
+                        break
+                    _t.sleep(0.05)
+                self.assertIsNot(t.reglas, reglas_antes)
+                self.assertEqual(t.reglas.ignorar, [])
+            finally:
+                for t in s.trabajadores.values():
+                    t.detener()
+                s.alertas.cerrar()
+                s.encuesta.cerrar()
+
+    def test_en_feria_cada_intento_es_su_propia_alerta(self):
+        from vigia.servidor import Sistema
+        with tempfile.TemporaryDirectory() as d:
+            cfg = copy.deepcopy(CFG)
+            cfg["camaras"] = []
+            s = Sistema(cfg, Path(d), demo=False, feria=True)
+            self.assertEqual(s.alertas.agrupar, 0)
+            s.alertas.cerrar()
+            s.encuesta.cerrar()
+
+
+class Prendas(unittest.TestCase):
+    """En clase se probó con una prenda y no la detectaba: el filtro la tomaba por ropa puesta apenas quedaba
+    delante del cuerpo, y las reglas de hurto no vigilaban ropa."""
+
+    def test_prenda_en_la_mano_no_es_ropa_puesta(self):
+        from vigia.objetos import FiltroObjetos
+        from vigia.simulador import H
+        from vigia.tipos import Objeto
+        p = persona(1, esqueleto(400, 480, "quieto", 0, 0, 1, 0))
+        w = p.punto(9)
+        en_mano = np.array([w[0] - 0.08 * H, w[1] - 0.02 * H, w[0] + 0.08 * H, w[1] + 0.25 * H])
+        puesta = np.array([400 - 0.13 * H, 480 - 0.82 * H, 400 + 0.13 * H, 480 - 0.48 * H])   # hombros a cadera
+        f, salida = FiltroObjetos(abierto=True), {}
+        for i in range(5):
+            for nombre, caja, oid in (("mano", en_mano, 1), ("puesta", puesta, 2)):
+                salida[nombre] = f.filtrar([Objeto(oid, "ropa", caja, 0.5)], i * 0.4, {}, [p])
+        self.assertEqual([o.clase for o in salida["mano"]], ["ropa"])
+        self.assertEqual(salida["puesta"], [])
+
+    def test_le_quitan_la_casaca_de_la_mano(self):
+        h = Arrebato().escena(Arrebato.tiron, clase="ropa")
+        self.assertTrue(h and "le quitó una ropa" in h[0].mensaje)
+
+    def test_ropa_de_la_tienda_con_clientes_delante_no_alerta(self):
+        from vigia.simulador import H
+        from vigia.tipos import Objeto
+        reglas, hist, tipos, t = Reglas(copy.deepcopy(CFG["reglas"])), Historial(), [], 0.0
+        perchero = np.array([380.0, 480 - 0.70 * H, 440, 480 - 0.30 * H])
+        while t < 60:
+            x = 410 if t < 20 else 410 + (t - 20) * 120         # un cliente mira el perchero y se va
+            per = [persona(1, esqueleto(x, 490, "quieto" if t < 20 else "camina", t, x, 1, 0))] if x < 950 else []
+            obs = Observacion(t=t, personas=per, objetos=[Objeto(3, "ropa", perchero)] if t >= 12 else [])
+            hist.actualizar(obs)
+            tipos += [e.tipo for e in reglas.evaluar(obs, hist, ANCHO, ALTO, [])]
+            t += 0.1
+        self.assertNotIn("abandono", tipos)
+        self.assertNotIn("hurto", tipos)
+
+    def test_casaca_dejada_en_una_silla_y_otro_se_la_lleva(self):
+        from vigia.simulador import H
+        from vigia.tipos import Objeto
+        reglas, hist, eventos, t = Reglas(copy.deepcopy(CFG["reglas"])), Historial(), [], 0.0
+        silla = np.array([270.0, 480 - 0.45 * H, 330, 480 - 0.20 * H])
+        while t < 26:
+            per, obj = [], []
+            if t < 11:                                    # llega caminando con la casaca en la mano
+                x = 150 + 15 * t
+                p = persona(1, esqueleto(x, 480, "camina", t, x, 1, 0))
+                w = p.punto(9)
+                per.append(p)
+                if t >= 4:
+                    obj.append(Objeto(30, "ropa", np.array([w[0] - 0.08 * H, w[1], w[0] + 0.08 * H, w[1] + 0.3 * H])))
+            elif t < 16:                                  # la deja en la silla y se va
+                x = 315 + (t - 11) * 110
+                per.append(persona(1, esqueleto(x, 480, "camina", t, x, 1, 0)))
+                obj.append(Objeto(30, "ropa", silla))
+            elif t < 19.5:                                # se acerca otra persona
+                x = 800 - (t - 16) * 140
+                per.append(persona(2, esqueleto(x, 480, "camina", t, x, -1, 0)))
+                obj.append(Objeto(30, "ropa", silla))
+            else:                                         # la toma y se va
+                x = 310 - (t - 19.5) * 120
+                p = persona(2, esqueleto(x, 480, "camina", t, x, -1, 0))
+                w = p.punto(10)
+                per.append(p)
+                obj.append(Objeto(30, "ropa", np.array([w[0] - 0.08 * H, w[1], w[0] + 0.08 * H, w[1] + 0.3 * H])))
+            obs = Observacion(t=t, personas=per, objetos=obj)
+            hist.actualizar(obs)
+            eventos += reglas.evaluar(obs, hist, ANCHO, ALTO, [])
+            t += 0.1
+        h = [e for e in eventos if e.tipo == "hurto"]
+        self.assertTrue(h and "#2" in h[0].mensaje, [e.mensaje for e in eventos])
+
+
+
+class ObjetosSinParpadeo(unittest.TestCase):
+    """En las pruebas la mochila aparecía y desaparecía: el detector la perdía un instante, le daba otro número y
+    el filtro volvía a esperar 3 detecciones antes de mostrarla."""
+
+    def test_cambio_de_numero_hereda_la_confirmacion(self):
+        from vigia.objetos import FiltroObjetos
+        from vigia.tipos import Objeto
+        f = FiltroObjetos()
+        caja = np.array([300, 200, 360, 280.0])
+        for i in range(4):
+            f.filtrar([Objeto(1, "mochila", caja + i, 0.5)], i * 0.3, {})
+        salida = f.filtrar([Objeto(7, "mochila", caja + 6, 0.35)], 1.5, {})     # mismo lugar, número nuevo
+        self.assertEqual([(o.id, o.clase) for o in salida], [(7, "mochila")])
+
+    def test_una_pasada_fallida_no_la_borra(self):
+        from vigia.objetos import FiltroObjetos
+        from vigia.tipos import Objeto
+        f = FiltroObjetos()
+        caja = np.array([300, 200, 360, 280.0])
+        for i in range(4):
+            f.filtrar([Objeto(1, "mochila", caja, 0.5)], i * 0.3, {})
+        self.assertEqual([o.id for o in f.filtrar([], 1.2, {})], [1])           # 0.3 s sin verla: sigue
+        self.assertEqual(f.filtrar([], 2.5, {}), [])                              # 1.6 s: ya no
+
+    def test_lo_que_nunca_se_confirmo_no_se_retiene(self):
+        from vigia.objetos import FiltroObjetos
+        from vigia.tipos import Objeto
+        f = FiltroObjetos()
+        f.filtrar([Objeto(1, "maleta", np.array([300, 200, 360, 280.0]), 0.3)], 0.0, {})
+        self.assertEqual(f.filtrar([], 0.3, {}), [])
+
+    def test_el_detector_usa_su_seguidor_y_tamano(self):
+        from vigia.modelos import SEGUIDOR_OBJETOS
+        import yaml as _y
+        conf = _y.safe_load(Path(SEGUIDOR_OBJETOS).read_text(encoding="utf-8"))
+        self.assertLess(conf["new_track_thresh"], 0.25)
+        self.assertGreaterEqual(CFG["modelos"]["tamano_imagen_objetos"], CFG["modelos"]["tamano_imagen"])
+
+
+
+class DuenoEnPantalla(unittest.TestCase):
+    def test_el_objeto_muestra_a_su_dueno(self):
+        h = Arrebato()
+        from vigia.simulador import H
+        from vigia.tipos import Objeto
+        reglas, hist, t = Reglas(copy.deepcopy(CFG["reglas"])), Historial(), 0.0
+        while t < 3:
+            k = esqueleto(400, 480, "quieto", t, 0, 1, 0)
+            m = Objeto(5, "mochila", np.array([400 - 0.10 * H, 480 - 0.78 * H, 400 + 0.03 * H, 480 - 0.50 * H]))
+            obs = Observacion(t=t, personas=[persona(3, k)], objetos=[m])
+            hist.actualizar(obs)
+            reglas.evaluar(obs, hist, ANCHO, ALTO, [])
+            t += 0.1
+        self.assertEqual(reglas.duenos(hist), {5: 3})

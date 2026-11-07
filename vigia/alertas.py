@@ -222,6 +222,24 @@ class GestorAlertas:
         w.writerows(filas)
         return buf.getvalue()
 
+    def borrar_todo(self) -> int:
+        """Borra todas las alertas y sus fotos (botón «Borrar historial» del panel, útil entre pruebas o
+        demostraciones). Devuelve cuántas había."""
+        with self._lock:
+            n = self._db.execute("SELECT COUNT(*) FROM alertas").fetchone()[0]
+            self._db.execute("DELETE FROM alertas")
+            try:
+                self._db.execute("DELETE FROM sqlite_sequence WHERE name = 'alertas'")   # la numeración vuelve a 1
+            except sqlite3.OperationalError:
+                pass
+            self._db.commit()
+            self._ultima.clear()
+            self._grupos.clear()
+        for f in (self.carpeta / "capturas").glob("*.jpg"):
+            f.unlink(missing_ok=True)
+        self._difundir({"evento": "limpiar", "datos": {"borradas": n}})
+        return n
+
     def limpiar_antiguas(self, dias: int) -> None:
         limite = time.time() - dias * 86400
         for f in (self.carpeta / "capturas").glob("*.jpg"):

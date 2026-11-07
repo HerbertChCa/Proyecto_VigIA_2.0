@@ -44,8 +44,42 @@ def _fijar_hilos():
     cv2.setNumThreads(1)
 
 
-CLASES_OBJETO = {24: "mochila", 26: "bolso", 28: "maleta", 1: "bicicleta", 2: "auto", 3: "motocicleta", 63: "laptop", 67: "celular",
-                 43: "cuchillo", 34: "bate"}
+SEGUIDOR_OBJETOS = str(Path(__file__).resolve().parent / "seguidores" / "objetos.yaml")
+
+CLASES_OBJETO = {24: "mochila", 26: "bolso", 28: "maleta", 1: "bicicleta", 2: "auto", 3: "motocicleta",
+                 43: "cuchillo", 34: "bate", 63: "laptop", 67: "celular"}
+
+# Vocabulario abierto (YOLO-World): el modelo busca objetos por su nombre escrito, gracias a un codificador de
+# texto tipo CLIP, en vez de limitarse a las 80 clases de COCO (que no incluye «ropa» ni «saco»). Los nombres
+# van en inglés porque es lo que entiende el modelo; la etiqueta que se muestra es la española.
+VOCABULARIO_BASE = {
+    "person": "persona",              # absorbe a las personas para que su ropa puesta no se lea como «ropa»
+    "backpack": "mochila", "handbag": "bolso", "suitcase": "maleta", "sack": "saco", "plastic bag": "bolsa",
+    "cardboard box": "caja", "clothes": "ropa", "jacket": "ropa", "sweater": "ropa", "hoodie": "ropa",
+    "coat": "ropa", "laptop": "laptop", "cell phone": "celular", "tablet": "tablet",
+    "camera": "cámara", "headphones": "audífonos", "wallet": "billetera",
+    "bicycle": "bicicleta", "motorcycle": "motocicleta", "car": "auto", "knife": "cuchillo", "baseball bat": "bate",
+}
+
+
+def vocabulario(cfg: dict) -> dict:
+    return cfg.get("vocabulario") or VOCABULARIO_BASE
+
+
+def modelo_abierto(cfg: dict) -> Optional[str]:
+    """Ruta del detector de vocabulario abierto si está preparado y activado; si no, se usa el de COCO."""
+    if not cfg.get("vocabulario_abierto", True) or not cfg.get("objetos_abierto"):
+        return None
+    p = Path(cfg["objetos_abierto"])
+    p = p if p.is_absolute() else RAIZ / p
+    return str(p) if p.exists() else None
+
+
+def nombres_objetos(cfg: dict) -> list[str]:
+    """Clases que puede reportar el detector de objetos en uso (para las casillas de Ajustes)."""
+    if modelo_abierto(cfg):
+        return [n for n in dict.fromkeys(vocabulario(cfg).values()) if n != "persona"]
+    return list(dict.fromkeys(CLASES_OBJETO.values()))
 
 
 class DetectorYOLO:
@@ -56,7 +90,18 @@ class DetectorYOLO:
         self.cfg = cfg
         _fijar_hilos()
         self.pose = YOLO(ruta_modelo(cfg["pose"]))
-        self.obj = YOLO(ruta_modelo(cfg["objetos"]))
+        abierto = modelo_abierto(cfg)
+        if abierto:
+            self.obj = YOLO(abierto)
+            vocab = vocabulario(cfg)
+            self._mapa = {int(i): vocab.get(n, n) for i, n in self.obj.names.items()}
+            self._clases, self._conf = None, float(cfg.get("confianza_objetos_abierto", 0.15))
+            log.info("Detector de objetos de vocabulario abierto: %s", ", ".join(sorted(set(self._mapa.values()))))
+        else:
+            self.obj = YOLO(ruta_modelo(cfg["objetos"]))
+            # umbral bajo a propósito: decide el filtro de objetos (confianza media y varias detecciones seguidas)
+            self._mapa, self._clases, self._conf = CLASES_OBJETO, list(CLASES_OBJETO), 0.20
+        self.abierto = abierto is not None
         self.n = 0
         self._ultimos_objetos: list[Objeto] = []
 
@@ -78,14 +123,19 @@ class DetectorYOLO:
                     puntos=None if kxy is None else kxy[i],
                     conf_puntos=None if kcf is None else kcf[i]))
         if self.n % max(1, c["objetos_cada_n_frames"]) == 0:
+            # los objetos son más chicos que las personas: se buscan en una imagen más grande, con un seguidor
+            # que acepta detecciones de baja confianza (una mochila puesta o una prenda en la mano)
             with _INFERENCIA:
-                ro = self.obj.track(frame, persist=True, tracker="bytetrack.yaml", imgsz=c["tamano_imagen"],
-                                    conf=0.30, classes=list(CLASES_OBJETO), verbose=False)[0]
+                ro = self.obj.track(frame, persist=True, tracker=SEGUIDOR_OBJETOS,
+                                    imgsz=c.get("tamano_imagen_objetos", c["tamano_imagen"]),
+                                    conf=self._conf, classes=self._clases, verbose=False)[0]
             self._ultimos_objetos = []
             if ro.boxes is not None and ro.boxes.id is not None:
                 for caja, oid, cls, cf in zip(ro.boxes.xyxy.cpu().numpy(), ro.boxes.id.int().cpu().tolist(),
                                               ro.boxes.cls.int().cpu().tolist(), ro.boxes.conf.cpu().numpy()):
-                    self._ultimos_objetos.append(Objeto(int(oid), CLASES_OBJETO.get(cls, "objeto"), caja, float(cf)))
+                    nombre = self._mapa.get(cls, "objeto")
+                    if nombre != "persona":           # las personas las sigue el modelo de pose
+                        self._ultimos_objetos.append(Objeto(int(oid), nombre, caja, float(cf)))
         obs.objetos = list(self._ultimos_objetos)
         self.n += 1
         return obs

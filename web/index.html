@@ -33,6 +33,7 @@
     <a class="btn" href="/aviso" target="_blank" title="Aviso de videovigilancia para imprimir">Aviso</a>
     <button class="btn" id="btn-zonas">Zonas</button>
     <button class="btn" id="btn-ajustes">Ajustes</button>
+    <button class="btn peligro" id="btn-limpiar" title="Borra todas las alertas y sus fotos, y reinicia lo que VigIA aprendió de la escena. Las cámaras, zonas y ajustes se conservan.">Borrar historial</button>
     <button class="btn primario" id="btn-camara">+ Cámara</button>
   </nav>
 </header>
@@ -179,16 +180,7 @@
       <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.activa"> Objetos abandonados y posible hurto</label>
       <label class="num">Tiempo para considerar abandono (s)<input type="number" step="1" min="5" data-ruta="reglas.objetos.tiempo_abandono"></label>
       <p class="ayuda">Objetos que se vigilan en todas las cámaras (apague los que el detector confunda con lo que hay en el lugar; por ejemplo, en una tienda de ropa, «maleta» y «bolso»):</p>
-      <div class="clases-objeto">
-        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.mochila"> Mochila</label>
-        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.bolso"> Bolso</label>
-        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.maleta"> Maleta</label>
-        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.bicicleta"> Bicicleta</label>
-        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.motocicleta"> Motocicleta</label>
-        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.auto"> Auto</label>
-        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.cuchillo"> Cuchillo</label>
-        <label class="fila"><input type="checkbox" data-ruta="reglas.objetos.clases.bate"> Bate</label>
-      </div>
+      <div class="clases-objeto" id="clases-objeto"></div>   <!-- una casilla por clase del detector en uso -->
       <label class="fila"><input type="checkbox" data-ruta="reglas.vehiculos.activa"> Robo de vehículos estacionados</label>
       <label class="fila"><input type="checkbox" data-ruta="reglas.huida.activa"> Robo con huida (tocar y salir corriendo)</label>
       <label class="fila"><input type="checkbox" data-ruta="reglas.vandalismo.activa"> Vandalismo en vehículos y zonas protegidas</label>

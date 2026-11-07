@@ -19,10 +19,19 @@ from .tipos import (CADERA_D, CADERA_I, CODO_D, CODO_I, EMOCIONES, HOMBRO_D, HOM
                     Evento, Observacion, alto_estimado)
 
 VEHICULOS = {"bicicleta", "auto", "motocicleta", "bicicleta o moto"}
-PORTATILES = {"mochila", "bolso", "maleta", "laptop", "celular"}
+PORTATILES = {"mochila", "bolso", "maleta", "saco", "bolsa", "caja", "laptop", "celular", "tablet", "cámara",
+              "audífonos", "billetera", "ropa"}
+# La ropa de una tienda (en percheros o escaparates) no la trajo nadie: queda como escenario y no alerta. Sí se
+# vigila una prenda que alguien trajo (una casaca dejada en una silla) o que lleva en la mano.
+PRENDAS = {"ropa"}
 ARMAS = {"cuchillo", "bate"}
 
 EXTREMIDADES = [MUNECA_I, MUNECA_D, CODO_I, CODO_D, TOBILLO_I, TOBILLO_D]
+
+# arrebato de un objeto que alguien lleva encima (valores por defecto si config.yaml no trae la sección)
+ARREBATO = {"activa": True, "tiempo_porte": 1.5, "cambio_min": 0.6, "distancia_mano": 0.45, "separacion": 1.2}
+# forcejeo: cuerpo a cuerpo sostenido con movimiento brusco, aunque no haya golpes rápidos
+FORCEJEO = {"activa": True, "duracion": 1.5, "brazos": 1.0, "empuje": 0.35}
 
 
 # --------------------------------------------------------------------------- utilidades
@@ -85,6 +94,38 @@ def contacto(p: Pista, otra, t: float, ventana: float = 1.5) -> bool:
             x, y = m.puntos[k]
             if x1 <= x <= x2 and y1 <= y <= y2:
                 return True
+    return False
+
+
+def fraccion_dentro(caja, contenedor) -> float:
+    """Fracción del área de caja que cae dentro de contenedor."""
+    ix = max(0.0, min(caja[2], contenedor[2]) - max(caja[0], contenedor[0]))
+    iy = max(0.0, min(caja[3], contenedor[3]) - max(caja[1], contenedor[1]))
+    return ix * iy / max(1e-6, (caja[2] - caja[0]) * (caja[3] - caja[1]))
+
+
+def cuerpos_juntos(pa, pb, minimo: float = 0.25) -> bool:
+    """¿Los troncos de dos personas se superponen en la imagen? En un forcejeo o un abrazo las manos quedan
+    detrás del otro y la pose no las ve: entonces el contacto se nota en que los cuerpos se juntan."""
+    a, b = zona_cuerpo(pa, 0.0), zona_cuerpo(pb, 0.0)
+    menor = min(fraccion_dentro(a, b), fraccion_dentro(b, a))
+    return max(fraccion_dentro(a, b), fraccion_dentro(b, a)) >= minimo and menor > 0
+
+
+def sostiene(persona, caja, distancia_mano: float = 0.45, clase: str = "") -> bool:
+    """¿La persona lleva el objeto encima? En la mano (una muñeca junto al objeto) o pegado al cuerpo
+    (una mochila a la espalda o abrazada queda casi entera dentro de la caja de la persona). Para una prenda
+    solo cuenta la mano: en una tienda, la ropa colgada queda detrás de los clientes sin que la lleven."""
+    if clase not in PRENDAS and fraccion_dentro(caja, persona.caja) >= 0.6:
+        return True
+    for k in (MUNECA_I, MUNECA_D):
+        q = persona.punto(k)
+        if q is None:
+            continue
+        dx = max(caja[0] - q[0], 0.0, q[0] - caja[2])
+        dy = max(caja[1] - q[1], 0.0, q[1] - caja[3])
+        if math.hypot(dx, dy) / persona.alto <= distancia_mano:
+            return True
     return False
 
 
@@ -218,7 +259,11 @@ class Reglas:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self._puestos: list[dict] = []   # vehículos estacionados vistos por esta cámara
-        self._contactos: dict = {}       # (quien toca, a quien) -> último instante de contacto
+        self._contactos: dict = {}       # (quien toca, a quien) -> (instante, distancia) para la regla de huida
+        self._ultimo_toque: dict = {}    # (quien toca, a quien) -> último instante con mano o pie en el cuerpo
+        self._juntos: dict = {}          # (a, b) con a < b -> [(t, ¿cuerpo a cuerpo?)] de los últimos segundos
+        self._portes: list[dict] = []    # objetos que alguien lleva encima, para detectar un arrebato
+        self._n_porte = 0
         self._multitud_desde = None
         self.reloj = lambda: datetime.now().time()   # se reemplaza en las pruebas
         self._t0 = None                  # primer cuadro analizado: lo que ya estaba es parte del escenario
@@ -246,6 +291,16 @@ class Reglas:
     def actualizar_cfg(self, cfg: dict):
         self.cfg = cfg
 
+    def duenos(self, hist: Historial) -> dict[int, int]:
+        """Número de seguimiento de cada objeto -> número de la persona dueña (quien lo trajo o lo lleva encima).
+        Se muestra en el video («mochila #12 de #3») para ver a quién asoció VigIA cada objeto."""
+        out = {oid: p.estado["dueno"] for oid, p in hist.objetos.items() if p.estado.get("dueno") is not None}
+        for r in self._portes:
+            if r["dueno"] is not None:
+                for oid in r["oids"]:
+                    out.setdefault(oid, r["dueno"])
+        return out
+
     def evaluar(self, obs: Observacion, hist: Historial, ancho: int, alto: int,
                 zonas: list[dict]) -> list[Evento]:
         ev: list[Evento] = []
@@ -253,6 +308,7 @@ class Reglas:
         if self._t0 is None:
             self._t0 = obs.t
         self._rap = self._rapidez(obs, hist)
+        self._registrar_contactos(obs, hist)
         if r["violencia"]["activa"]:
             ev += self._violencia(obs, hist)
         if r.get("huida", {}).get("activa"):
@@ -269,6 +325,8 @@ class Reglas:
             ev += self._zonas(obs, hist, ancho, alto, zonas)
         if r["objetos"]["activa"]:
             ev += self._objetos(obs, hist)
+            if {**ARREBATO, **r.get("arrebato", {})}["activa"]:
+                ev += self._arrebato(obs, hist)
         if r.get("vehiculos", {}).get("activa"):
             ev += self._vehiculos(obs)
         ev += self._emociones(obs, hist)
@@ -291,7 +349,98 @@ class Reglas:
             out[p.id] = (dur, pista.estado["vel_max"])
         return out
 
-    # ---- violencia: dos personas cerca con extremidades muy rápidas y contacto
+    # ---- contactos entre personas, compartidos por violencia, forcejeo, derribo y huida
+    def _registrar_contactos(self, obs, hist) -> None:
+        t = obs.t
+        act = {p.id: p for p in obs.personas if p.id in hist.personas}
+        cerca = []
+        for a, pa in act.items():
+            for b, pb in act.items():
+                if a == b:
+                    continue
+                dist = float(np.linalg.norm(pa.centro - pb.centro)) / ((pa.alto + pb.alto) / 2)
+                if dist > 1.2:
+                    continue
+                if a < b:
+                    cerca.append((a, b))
+                if contacto(hist.personas[a], pb, t, ventana=0.5):
+                    self._contactos[(a, b)] = (t, dist)
+                    self._ultimo_toque[(a, b)] = t
+        for a, b in cerca:
+            cuerpo = cuerpos_juntos(act[a], act[b])
+            if cuerpo:
+                self._ultimo_toque[(a, b)] = t                  # cuerpo a cuerpo también cuenta para el derribo
+            toque = cuerpo or self._ultimo_toque.get((b, a)) == t
+            self._juntos.setdefault((a, b), []).append((t, toque))
+        for k in [k for k, (tc, _) in self._contactos.items() if t - tc > 10]:
+            del self._contactos[k]
+        for k in [k for k, tc in self._ultimo_toque.items() if t - tc > 10]:
+            del self._ultimo_toque[k]
+        for k in list(self._juntos):
+            self._juntos[k] = [m for m in self._juntos[k] if t - m[0] <= 3.0]
+            if not self._juntos[k]:
+                del self._juntos[k]
+
+    def _forcejeo(self, a, b, pistas, t) -> Optional[str]:
+        """Cuerpo a cuerpo sostenido con movimiento brusco (empujones, tirones, agarres) aunque no haya golpes
+        rápidos. Un abrazo no cuenta: los cuerpos están juntos pero quietos. Devuelve la evidencia o None."""
+        f = {**FORCEJEO, **self.cfg["violencia"].get("forcejeo", {})}
+        if not f["activa"]:
+            return None
+        muestras = [m for m in self._juntos.get((min(a, b), max(a, b)), []) if t - m[0] <= f["duracion"]]
+        if len(muestras) < 3 or t - muestras[0][0] < 0.8 * f["duracion"]:
+            return None
+        juntos = sum(1 for _, j in muestras if j) / len(muestras)
+        if juntos < 0.7:
+            return None
+        # posición de una persona respecto de la otra, cuadro a cuadro: en un forcejeo va y viene (empujones,
+        # tirones) pero no se aleja; dos personas que se cruzan caminando también se tapan, pero pasan de largo
+        pa = {round(m.t, 3): _torso(m) for m in pistas[a].ventana(t, f["duracion"])}
+        pb = {round(m.t, 3): _torso(m) for m in pistas[b].ventana(t, f["duracion"])}
+        comunes = sorted(set(pa) & set(pb))
+        if len(comunes) < 3:
+            return None
+        alto = (pistas[a].alto_de_pie(t) + pistas[b].alto_de_pie(t)) / 2
+        rel = [(pa[k] - pb[k]) / alto for k in comunes]
+        recorrido = sum(float(np.linalg.norm(q - p)) for p, q in zip(rel, rel[1:]))
+        neto = float(np.linalg.norm(rel[-1] - rel[0]))
+        if neto > 0.5 or neto > 0.6 * recorrido:
+            return None                                        # pasaron de largo o se separaron
+        empuje = recorrido / max(comunes[-1] - comunes[0], 1e-6)
+        brazos = max(self._rapidez_brazos(pistas[a], t), self._rapidez_brazos(pistas[b], t))
+        if brazos < f["brazos"] and empuje < f["empuje"]:
+            return None                                        # juntos y quietos: un abrazo, una conversación
+        return (f"Cuerpo a cuerpo durante {t - muestras[0][0]:.1f} s ({juntos:.0%} del tiempo) con movimiento brusco: "
+                f"brazos a {brazos:.1f} alturas/s y empujones de {empuje:.2f} alturas/s entre ambos cuerpos "
+                f"(umbrales {f['brazos']} y {f['empuje']}), sin separarse.")
+
+    @staticmethod
+    def _rapidez_brazos(p: Pista, t: float) -> float:
+        """Velocidad máxima de muñecas y codos respecto del torso en el último segundo (sin los pies: al
+        caminar, los tobillos ya se mueven rápido respecto de la cadera)."""
+        v = p.ventana(t, 1.0)
+        mejor = 0.0
+        alto = p.alto_de_pie(t)
+        for m0, m1 in zip(v, v[1:]):
+            dt = m1.t - m0.t
+            if dt <= 0 or m0.puntos is None or m1.puntos is None:
+                continue
+            t0, t1 = _torso(m0), _torso(m1)
+            for k in (MUNECA_I, MUNECA_D, CODO_I, CODO_D):
+                if m0.conf_puntos is not None and (m0.conf_puntos[k] < 0.3 or m1.conf_puntos[k] < 0.3):
+                    continue
+                rel = (m1.puntos[k] - t1) - (m0.puntos[k] - t0)
+                mejor = max(mejor, float(np.linalg.norm(rel)) / dt / alto)
+        return mejor
+
+    @staticmethod
+    def _vel_vector(p: Pista, t: float, ventana: float = 1.0) -> np.ndarray:
+        v = p.ventana(t, ventana)
+        if len(v) < 2 or v[-1].t - v[0].t < 0.3:
+            return np.zeros(2)
+        return (_torso(v[-1]) - _torso(v[0])) / (v[-1].t - v[0].t) / p.alto_de_pie(t)
+
+    # ---- violencia: dos personas cerca con extremidades muy rápidas y contacto, o en forcejeo
     def _violencia(self, obs, hist) -> list[Evento]:
         c = self.cfg["violencia"]
         t = obs.t
@@ -309,18 +458,31 @@ class Reglas:
                     continue
                 dur = max(rapidos.get(a, (0, 0))[0], rapidos.get(b, (0, 0))[0])
                 vmax = max(rapidos.get(a, (0, 0))[1], rapidos.get(b, (0, 0))[1])
-                if dur < c["duracion_min"]:
+                golpes = dur >= c["duracion_min"] and (not c.get("requiere_contacto", True) or
+                                                      contacto(pistas[a], pb, t) or contacto(pistas[b], pa, t))
+                if golpes:
+                    eventos.append(Evento(
+                        "violencia", "alta", f"Posible pelea entre las personas #{a} y #{b}",
+                        f"Extremidades a {vmax:.1f} alturas/s (umbral {c['velocidad_extremidades']}) durante "
+                        f"{dur:.1f} s, con {dist:.2f} alturas de separación y contacto de una mano o un pie "
+                        "con el tronco o la cabeza de la otra persona.",
+                        f"violencia:{a}-{b}", [pa.caja.tolist(), pb.caja.tolist()]))
                     continue
-                if c.get("requiere_contacto", True) and not (
-                        contacto(pistas[a], pb, t) or contacto(pistas[b], pa, t)):
-                    continue
-                eventos.append(Evento(
-                    "violencia", "alta", f"Posible pelea entre las personas #{a} y #{b}",
-                    f"Extremidades a {vmax:.1f} alturas/s (umbral {c['velocidad_extremidades']}) durante "
-                    f"{dur:.1f} s, con {dist:.2f} alturas de separación y contacto de una mano o un pie "
-                    "con el tronco o la cabeza de la otra persona.",
-                    f"violencia:{a}-{b}", [pa.caja.tolist(), pb.caja.tolist()]))
+                forcejeo = self._forcejeo(a, b, pistas, t)
+                if forcejeo:
+                    eventos.append(Evento(
+                        "violencia", "alta", f"Posible pelea o forcejeo entre las personas #{a} y #{b}",
+                        forcejeo, f"violencia:{a}-{b}", [pa.caja.tolist(), pb.caja.tolist()]))
         return eventos
+
+    def _quien_derribo(self, victima: int, desde: float, hasta: float) -> Optional[int]:
+        """Persona que tuvo contacto con el cuerpo de la víctima (o cuerpo a cuerpo) justo antes de que cayera."""
+        mejor = None
+        for (a, b), tc in self._ultimo_toque.items():
+            otro = a if b == victima else b if a == victima else None
+            if otro is not None and desde <= tc <= hasta and (mejor is None or tc > mejor[0]):
+                mejor = (tc, otro)
+        return None if mejor is None else mejor[1]
 
     # ---- caídas y persona en el suelo
     def _caida(self, obs, hist) -> list[Evento]:
@@ -361,6 +523,16 @@ class Reglas:
                             f"El centro de la cadera bajó {descenso:.2f} alturas en menos de 2.5 s y el "
                             f"cuerpo quedó a ras del suelo (cabeza y cadera casi a la altura de los pies).",
                             f"caida:{p.id}", [p.caja.tolist()]))
+                        # ¿alguien la tenía agarrada o la tocó justo antes? Entonces no fue un accidente
+                        agresor = self._quien_derribo(p.id, est["horiz_desde"] - 3.0, t)
+                        if agresor is not None and self.cfg["violencia"]["activa"]:
+                            otro = next((q for q in obs.personas if q.id == agresor), None)
+                            out.append(Evento(
+                                "violencia", "alta", f"Posible agresión: la persona #{agresor} derribó a #{p.id}",
+                                f"La persona #{agresor} estuvo en contacto con el cuerpo de #{p.id} (mano, pie o cuerpo "
+                                f"a cuerpo) en los 3 s previos a la caída, y #{p.id} quedó en el suelo.",
+                                f"violencia:derribo:{agresor}:{p.id}",
+                                [p.caja.tolist()] + ([otro.caja.tolist()] if otro is not None else [])))
             if not est["suelo"] and tendido >= c["en_suelo_alerta"]:
                 est["suelo"] = True
                 out.append(Evento(
@@ -501,12 +673,26 @@ class Reglas:
             # lo que se ve desde el inicio, lo que ya se recordaba en ese sitio o lo que aparece sin nadie al lado
             # (un estante, una prenda en un escaparate) es escenario.
             if "origen" not in est and not self._heredar(o, est, hist, t):
-                ya_estaba = t - self._t0 < c.get("calentamiento", 10) or self._es_escenario(o.caja)
+                # alguien lo lleva encima (en la mano o a la espalda): lo trajo esa persona, aunque VigIA recién
+                # arranque o el objeto aparezca donde antes hubo otro. Así una prueba que empieza con la mochila
+                # puesta, o que se repite en el mismo lugar, no se toma como parte del escenario.
+                encima = any(sostiene(per, o.caja, clase=o.clase) for per in obs.personas)
+                ya_estaba = not encima and (t - self._t0 < c.get("calentamiento", 10) or self._es_escenario(o.caja)
+                                            or o.clase in PRENDAS)   # una prenda la trae alguien en la mano;
+                                                                     # si aparece suelta, es la de la tienda
                 est["origen"], est["visto_desde"] = ("escenario" if ya_estaba else "nuevo"), t
+            diag = float(np.hypot(o.caja[2] - o.caja[0], o.caja[3] - o.caja[1]))
+            if est["origen"] == "nuevo" and o.clase in PRENDAS and not est.get("traida"):
+                # una prenda que alguien trajo llega en movimiento; la de un perchero o un escaparate solo la tocan
+                # los clientes al mirarla y no se mueve: a los 5 s sin moverse pasa a ser parte del lugar
+                ini = est.setdefault("centro_inicial", o.centro.copy())
+                if float(np.linalg.norm(o.centro - ini)) >= 0.5 * diag:
+                    est["traida"] = True
+                elif t - est["visto_desde"] > 5.0:
+                    est["origen"] = "escenario"
             if est["origen"] == "escenario":
                 self._recordar_escenario(o.caja)
                 continue
-            diag = float(np.hypot(o.caja[2] - o.caja[0], o.caja[3] - o.caja[1]))
             ultimos = pista.ventana(t, 1.5)
             mov = float(np.linalg.norm(ultimos[-1].caja[:2] - ultimos[0].caja[:2])) if len(ultimos) > 1 else 0.0
             quieto = mov < 0.35 * diag
@@ -563,6 +749,89 @@ class Reglas:
                             "El objeto había sido marcado como abandonado y empezó a moverse.",
                             f"retiro:{o.id}:{portador}", [o.caja.tolist()]))
                     est["estuvo_quieto"] = False
+        return out
+
+    # ---- arrebato: alguien le quita a otra persona un objeto que esta llevaba encima
+    def _arrebato(self, obs, hist) -> list[Evento]:
+        """La regla de hurto vigila objetos que quedaron quietos (en el piso, sobre una mesa). En un arrebato el
+        objeto nunca está quieto: va en la mano o a la espalda de su dueño y pasa a las manos de otra persona,
+        a veces con forcejeo, y esa persona se aleja. Se sigue a cada objeto por su lugar y no solo por su número
+        de seguimiento, porque en el tirón el detector lo pierde o le cambia el número."""
+        c = {**ARREBATO, **self.cfg.get("arrebato", {})}
+        t, out = obs.t, []
+        personas = {p.id: p for p in obs.personas}
+        vistos = set()
+        for o in obs.objetos:
+            if o.clase not in PORTATILES or self._ignorado(o.caja):
+                continue
+            diag = float(np.hypot(o.caja[2] - o.caja[0], o.caja[3] - o.caja[1]))
+            quienes = tuple(sorted(pid for pid, p in personas.items()
+                                   if sostiene(p, o.caja, c["distancia_mano"], o.clase)))
+            rec = next((r for r in self._portes if o.id in r["oids"]), None)
+            if rec is None:          # ¿el mismo objeto con otro número? Cerca de donde estaba, o en manos de quien lo sujetaba
+                cand = [r for r in self._portes if r["id"] not in vistos and 0 < t - r["ult"] <= 3.0
+                        and r["clase"] == o.clase and (
+                            float(np.linalg.norm(r["centro"] - o.centro)) <= 3.0 * max(r["diag"], diag)
+                            or set(quienes) & set(r["muestras"][-1][1] if r["muestras"] else ()))]
+                rec = min(cand, key=lambda r: float(np.linalg.norm(r["centro"] - o.centro))) if cand else None
+            if rec is None:
+                self._n_porte += 1
+                rec = {"id": self._n_porte, "oids": set(), "clase": o.clase, "muestras": [], "dueno": None,
+                       "forcejeo": [], "avisado": False}
+                self._portes.append(rec)
+            rec["oids"].add(o.id)
+            vistos.add(rec["id"])
+            rec.update(centro=o.centro.copy(), diag=diag, ult=t, caja=o.caja.copy())
+            rec["muestras"] = [m for m in rec["muestras"] if t - m[0] <= 8.0] + [(t, quienes)]
+            if len(quienes) >= 2:
+                rec["forcejeo"] = [x for x in rec["forcejeo"] if t - x <= 6.0] + [t]
+            if rec["dueno"] is None:                         # lo lleva una sola persona de forma sostenida
+                recientes = [q for tm, q in rec["muestras"] if t - tm <= c["tiempo_porte"]]
+                if rec["muestras"] and t - rec["muestras"][0][0] >= 0.9 * c["tiempo_porte"] and recientes:
+                    solos = [q[0] for q in recientes if len(q) == 1]
+                    if solos and solos.count(solos[-1]) >= 0.8 * len(recientes):
+                        rec["dueno"], rec["dueno_desde"] = solos[-1], t
+
+        for rec in self._portes:
+            if rec["avisado"] or rec["dueno"] is None:
+                continue
+            a = rec["dueno"]
+            ultimos = [(tm, q) for tm, q in rec["muestras"] if rec["ult"] - tm <= c["cambio_min"]]
+            if not ultimos or rec["ult"] - ultimos[0][0] < 0.6 * c["cambio_min"]:
+                continue
+            otros = [q for _, q in ultimos if q and a not in q]
+            if len(otros) < 0.8 * len(ultimos):
+                continue                                     # el dueño todavía lo tiene, o nadie lo lleva
+            b = otros[-1][0]
+            # pasó directo de las manos (o la espalda) del dueño a las de otro: no lo recogió del piso horas después
+            con_dueno = [tm for tm, q in rec["muestras"] if a in q]
+            if not con_dueno or ultimos[0][0] - con_dueno[-1] > 2.0:
+                continue
+            pa, pb = personas.get(a), personas.get(b)
+            if pb is None and b in hist.personas and t - hist.personas[b].ultima_vez <= 1.0:
+                pb = hist.personas[b].muestras[-1]
+            if pa is None and a in hist.personas and t - hist.personas[a].ultima_vez <= 2.0:
+                pa = hist.personas[a].muestras[-1]
+            if pa is None or pb is None:
+                continue
+            ca = np.array([(pa.caja[0] + pa.caja[2]) / 2, (pa.caja[1] + pa.caja[3]) / 2])
+            cb = np.array([(pb.caja[0] + pb.caja[2]) / 2, (pb.caja[1] + pb.caja[3]) / 2])
+            alto = (alto_estimado(pa.caja, pa.puntos, pa.conf_puntos) + alto_estimado(pb.caja, pb.puntos, pb.conf_puntos)) / 2
+            sep = float(np.linalg.norm(ca - cb)) / alto
+            if sep < c["separacion"]:
+                continue                                     # siguen juntos: puede ser que se la esté mostrando
+            rec["avisado"] = True
+            forcejeo = [x for x in rec["forcejeo"] if t - x <= 6.0]
+            lucha = (f" Hubo forcejeo: ambas personas sujetaban la {rec['clase']} a la vez ({len(forcejeo)} cuadros)."
+                     if forcejeo else "")
+            out.append(Evento(
+                "hurto", "alta" if forcejeo or (a, b) in self._contactos or (b, a) in self._contactos else "media",
+                f"Posible arrebato: la persona #{b} le quitó una {rec['clase']} a la persona #{a}",
+                f"La {rec['clase']} la llevaba encima la persona #{a} (en la mano o a la espalda) desde hace "
+                f"{rec['ult'] - rec['dueno_desde'] + c['tiempo_porte']:.0f} s; ahora la lleva la persona #{b}, que ya está "
+                f"a {sep:.1f} alturas de #{a} (umbral {c['separacion']}).{lucha}",
+                f"arrebato:{rec['id']}:{b}", [rec["caja"].tolist(), list(map(float, pb.caja))]))
+        self._portes = [r for r in self._portes if t - r["ult"] <= 6.0]
         return out
 
     # ---- robo de vehículos: alguien distinto de quien lo estacionó lo manipula o se lo lleva
@@ -622,18 +891,11 @@ class Reglas:
         t = obs.t
         out = []
         act = {p.id: p for p in obs.personas if p.id in hist.personas}
-        for a, pa in act.items():                       # registrar contactos recientes
-            for b, pb in act.items():
-                if a == b:
-                    continue
-                dist = float(np.linalg.norm(pa.centro - pb.centro)) / ((pa.alto + pb.alto) / 2)
-                if dist <= 1.2 and contacto(hist.personas[a], pb, t, ventana=0.5):
-                    self._contactos[(a, b)] = t
-        for (a, b), tc in list(self._contactos.items()):
+        for (a, b), (tc, dc) in list(self._contactos.items()):   # los registra _registrar_contactos
             if t - tc > c["ventana"]:
                 del self._contactos[(a, b)]
                 continue
-            if a not in act or a not in hist.personas:
+            if a not in act or a not in hist.personas or (a, b) not in self._contactos:
                 continue
             va = velocidad_cuerpo(hist.personas[a], t)
             vb = velocidad_cuerpo(hist.personas[b], t) if b in hist.personas else 0.0
@@ -643,7 +905,26 @@ class Reglas:
                     f"La mano o el pie de #{a} llegó al cuerpo de #{b} y {t - tc:.1f} s después #{a} se aleja a "
                     f"{va:.1f} alturas/s (umbral {c['velocidad']}); #{b} se mueve a {vb:.1f}.",
                     f"robo_huida:{a}:{b}", [act[a].caja.tolist()]))
-                del self._contactos[(a, b)]
+                self._contactos.pop((a, b), None)
+                self._contactos.pop((b, a), None)
+                continue
+            # Con una cámara que se mueve (un celular en la mano que sigue al que huye) la velocidad de cada persona
+            # en la imagen engaña; la distancia entre las dos, no: si se separan muy rápido después del contacto,
+            # una de ellas huyó, aunque la cámara la haya seguido.
+            if b not in act or t - tc < 0.5:
+                continue
+            pa, pb = act[a], act[b]
+            dn = float(np.linalg.norm(pa.centro - pb.centro)) / ((pa.alto + pb.alto) / 2)
+            ritmo = (dn - dc) / (t - tc)
+            if ritmo >= c.get("separacion", 1.8) and dn - dc >= 1.5:
+                out.append(Evento(
+                    "robo_huida", "alta", f"Posible asalto o arrebato: la persona #{a} tocó a #{b} y se separaron corriendo",
+                    f"La mano o el pie de #{a} llegó al cuerpo de #{b}; en los {t - tc:.1f} s siguientes se alejaron "
+                    f"a {ritmo:.1f} alturas/s (umbral {c.get('separacion', 1.8)}), de {dc:.1f} a {dn:.1f} alturas de "
+                    "distancia. Esta medida no depende de que la cámara esté quieta.",
+                    f"robo_huida:{a}:{b}", [pa.caja.tolist(), pb.caja.tolist()]))
+                self._contactos.pop((a, b), None)
+                self._contactos.pop((b, a), None)
         return out
 
     # ---- vandalismo: golpes rápidos contra un vehículo o una zona protegida, sin otra persona cerca

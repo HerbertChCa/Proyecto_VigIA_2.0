@@ -1,0 +1,10 @@
+# Seguidor (ByteTrack) para los objetos. El de ultralytics por defecto solo abre un seguimiento nuevo con
+# confianza 0.25 o más; una mochila puesta a la espalda o una prenda en la mano suelen salir con 0.15-0.30, sobre
+# todo con el detector de vocabulario abierto, y entonces el objeto aparecía y desaparecía o no aparecía nunca.
+tracker_type: bytetrack
+track_high_thresh: 0.15   # detecciones que se asocian primero
+track_low_thresh: 0.05    # detecciones débiles que igual sirven para no perder un objeto ya seguido
+new_track_thresh: 0.18    # confianza mínima para empezar a seguir un objeto nuevo
+track_buffer: 60          # cuántas pasadas del detector se recuerda un objeto que dejó de verse
+match_thresh: 0.85        # tolerancia para asociar la caja nueva con la anterior (objetos que se mueven rápido)
+fuse_score: True

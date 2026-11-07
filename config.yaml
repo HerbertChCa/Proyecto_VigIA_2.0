@@ -25,8 +25,39 @@ modelos:
   pose: models/yolo11n-pose.pt       # personas + 17 puntos del esqueleto + seguimiento
   objetos: models/yolo11n.pt         # mochilas, bolsos, maletas y vehículos
   tamano_imagen: 480           # menor = más rápido en CPU
+  tamano_imagen_objetos: 640   # los objetos son chicos: una mochila a 4 m casi no se ve a 480 (si va lento, baje a 480)
   confianza: 0.40
-  objetos_cada_n_frames: 3     # el detector de objetos corre 1 de cada N frames
+  objetos_cada_n_frames: 3     # el detector de objetos corre 1 de cada N frames (2 = detecta mejor, más lento)
+  # Vocabulario abierto (YOLO-World): reconoce objetos por su nombre (ropa, saco, tablet…), no solo las
+  # 80 clases de COCO. Se prepara una vez, con internet:  python scripts/preparar_vocabulario.py
+  # Si el archivo no existe, se usa el detector de COCO de arriba.
+  vocabulario_abierto: true
+  objetos_abierto: models/vigia-vocabulario.pt
+  confianza_objetos_abierto: 0.15
+  vocabulario:                 # inglés (lo que entiende el modelo): español (lo que se muestra). Agregue lo que necesite
+    person: persona            # no borrar: evita que la ropa puesta se lea como «ropa»
+    backpack: mochila
+    handbag: bolso
+    suitcase: maleta
+    sack: saco
+    plastic bag: bolsa
+    cardboard box: caja
+    clothes: ropa
+    jacket: ropa               # casacas, chompas y polerones: «clothes» solo no basta para el detector
+    sweater: ropa
+    hoodie: ropa
+    coat: ropa
+    laptop: laptop
+    cell phone: celular
+    tablet: tablet
+    camera: cámara
+    headphones: audífonos
+    wallet: billetera
+    bicycle: bicicleta
+    motorcycle: motocicleta
+    car: auto
+    knife: cuchillo
+    baseball bat: bate
   rostros: models/face_detection_yunet_2023mar.onnx
   emociones: models/facial_expression_recognition_mobilefacenet_2022july.onnx
 
@@ -52,6 +83,11 @@ reglas:
     distancia_max: 1.2            # distancia entre personas (alturas)
     duracion_min: 0.6             # segundos sostenidos
     requiere_contacto: true       # una mano o un pie debe llegar al cuerpo de la otra persona
+    forcejeo:                     # cuerpo a cuerpo con empujones o tirones, aunque no haya golpes rápidos
+      activa: true
+      duracion: 1.5               # segundos con los cuerpos juntos (70 % del tiempo o más)
+      brazos: 1.0                 # alturas/s de muñecas o codos, o bien...
+      empuje: 0.35                # ...alturas/s que un cuerpo se mueve contra el otro sin separarse
   caida:
     activa: true
     angulo_horizontal: 60         # grados del tronco respecto de la vertical
@@ -86,6 +122,13 @@ reglas:
     activa: true                  # robo con huida: tocó a otra persona y salió corriendo
     velocidad: 1.6                # alturas/s del cuerpo (caminar ~0.7, correr > 1.6)
     ventana: 4                    # segundos después del contacto en que se vigila la huida
+    separacion: 1.8               # alturas/s a las que se separan tras el contacto (sirve con la cámara en movimiento)
+  arrebato:
+    activa: true                  # le quitan a alguien un objeto que llevaba encima (en la mano o a la espalda)
+    tiempo_porte: 1.5             # segundos que el dueño lo lleva encima antes del tirón
+    cambio_min: 0.6               # segundos que la otra persona debe tenerlo sin el dueño
+    distancia_mano: 0.45          # alturas entre la muñeca y el objeto para contar que lo sujeta
+    separacion: 1.2               # alturas entre ambas personas para dar la alerta (si siguen juntas, no)
   vandalismo:
     activa: true                  # golpes contra un vehículo o una zona "protegida" sin nadie cerca
   armas:
@@ -110,4 +153,5 @@ busqueda:
 
 alertas:
   enfriamiento: 30                # no repite la misma alerta de la misma persona antes de N s
-  agrupar: 60                     # alertas del mismo tipo en la misma cámara dentro de N s se suman (×N) en una sola
+  agrupar: 20                     # alertas del mismo tipo en la misma cámara dentro de N s se suman (×N) en una sola
+                                  # (en modo feria no se agrupan: cada intento del reto es su propia alerta)

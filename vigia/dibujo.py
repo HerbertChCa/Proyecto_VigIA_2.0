@@ -6,6 +6,7 @@ import unicodedata
 import cv2
 import numpy as np
 
+from .reglas import punto_en_poligono
 from .tipos import ESQUELETO, Observacion
 
 COLOR_NORMAL = (180, 200, 60)     # BGR: verde azulado
@@ -78,21 +79,39 @@ def solo_esqueleto(img: np.ndarray, obs: Observacion, margen: float = 0.06) -> N
 
 
 def dibujar(img: np.ndarray, obs: Observacion, zonas: list[dict], en_alerta: set[int],
-            emociones: dict[int, str], encabezado: str, grueso: bool = False) -> np.ndarray:
+            emociones: dict[int, str], encabezado: str, grueso: bool = False,
+            duenos: dict[int, int] | None = None) -> np.ndarray:
     h, w = img.shape[:2]
+    # Zonas bien visibles aunque la pared o el piso sean claros (en la prueba de clase casi no se notaban):
+    # relleno más intenso, borde grueso con contorno oscuro y, si hay alguien dentro, la zona se enciende.
+    dentro = [sum(1 for p in obs.personas if punto_en_poligono(p.pies[0] / w, p.pies[1] / h, z["puntos"]))
+              for z in zonas]
     capa = img.copy()
     for z in zonas:
         pts = (np.array(z["puntos"]) * [w, h]).astype(np.int32)
-        col = COLOR_ZONA.get(z.get("tipo"), (200, 200, 200))
-        cv2.fillPoly(capa, [pts], col)
-    cv2.addWeighted(capa, 0.22, img, 0.78, 0, img)
-    for z in zonas:
+        cv2.fillPoly(capa, [pts], COLOR_ZONA.get(z.get("tipo"), (200, 200, 200)))
+    cv2.addWeighted(capa, 0.32, img, 0.68, 0, img)
+    if any(dentro):
+        capa = img.copy()
+        for z, n in zip(zonas, dentro):
+            if n:
+                pts = (np.array(z["puntos"]) * [w, h]).astype(np.int32)
+                cv2.fillPoly(capa, [pts], COLOR_ALERTA if z.get("tipo") == "restringida" else
+                             COLOR_ZONA.get(z.get("tipo"), (200, 200, 200)))
+        cv2.addWeighted(capa, 0.35, img, 0.65, 0, img)
+    for z, n in zip(zonas, dentro):
         pts = (np.array(z["puntos"]) * [w, h]).astype(np.int32)
-        col = COLOR_ZONA.get(z.get("tipo"), (200, 200, 200))
-        cv2.polylines(img, [pts], True, col, 2, cv2.LINE_AA)
+        col = COLOR_ALERTA if (n and z.get("tipo") == "restringida") else COLOR_ZONA.get(z.get("tipo"), (200, 200, 200))
+        cv2.polylines(img, [pts], True, (20, 20, 20), 6 if n else 5, cv2.LINE_AA)
+        cv2.polylines(img, [pts], True, col, 4 if n else 3, cv2.LINE_AA)
         hor = z.get("horario")
         franja = f" {hor['desde']}-{hor['hasta']}" if hor else ""
-        _texto(img, f"{z['nombre']} ({z.get('tipo', '')}{franja})", pts[0] + [4, 18], col, 0.45)
+        estado = ""
+        if n:
+            estado = "  INTRUSION" if z.get("tipo") == "restringida" else f"  {n} dentro"
+        arriba = pts[np.argmin(pts[:, 1])]
+        _texto(img, f"{z['nombre']} ({z.get('tipo', '')}{franja}){estado}", (arriba[0] + 4, max(arriba[1] - 6, 36)),
+               col, 0.6)
 
     for p in obs.personas:
         col = COLOR_ALERTA if p.id in en_alerta else COLOR_NORMAL
@@ -116,7 +135,9 @@ def dibujar(img: np.ndarray, obs: Observacion, zonas: list[dict], en_alerta: set
     for o in obs.objetos:
         x1, y1, x2, y2 = (int(v) for v in o.caja)
         cv2.rectangle(img, (x1, y1), (x2, y2), COLOR_OBJETO, 2)
-        _texto(img, f"{o.clase} #{o.id}", (x1, y1 - 4), COLOR_OBJETO, 0.42)
+        dueno = (duenos or {}).get(o.id)
+        _texto(img, f"{o.clase} #{o.id}" + (f" de #{dueno}" if dueno is not None else ""), (x1, y1 - 4),
+               COLOR_OBJETO, 0.42)
 
     _texto(img, encabezado, (10, 22), (235, 235, 235), 0.55)
     return img

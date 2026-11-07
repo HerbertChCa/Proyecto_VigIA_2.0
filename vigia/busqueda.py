@@ -108,6 +108,12 @@ class Buscador:
     def detener(self) -> None:
         self._cola.put(None)
 
+    def vaciar(self) -> None:
+        """Olvida todas las capturas indexadas (se borraron con el historial)."""
+        with self._lock:
+            self._nombres, self._vectores = [], None
+            self.archivo.unlink(missing_ok=True)
+
     # ---- índice
     def _indexar(self, nombre: str) -> None:
         ruta = self.capturas / nombre

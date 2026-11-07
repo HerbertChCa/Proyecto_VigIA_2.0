@@ -193,14 +193,19 @@ function conectar() {
     }
     else if (evento === "alerta") llegaAlerta(datos);
     else if (evento === "repetida") {
-      // la misma situación sigue ocurriendo: se suma a la alerta pendiente en vez de crear otra fila
+      // la misma situación volvió a ocurrir: se suma a la alerta pendiente, que sube al inicio de la lista y se
+      // resalta como una nueva (en la prueba de clase un segundo intento pasaba desapercibido como «×2»)
       const a = alertasCargadas.get(datos.id);
       if (a) {
-        a.repeticiones = datos.repeticiones; a.ultima = datos.ultima;
+        a.repeticiones = datos.repeticiones; a.ultima = datos.ultima; a.mensaje = datos.mensaje; a.explicacion = datos.explicacion;
         const li = document.querySelector(`.alerta[data-id="${datos.id}"]`);
-        if (li) li.replaceWith(tarjetaAlerta(a, false));
+        if (li) { li.remove(); $("#alertas").prepend(tarjetaAlerta(a, true)); }
+        if (datos.severidad === "alta") pitido();
       }
       camaraEnAlerta.set(datos.camara, Date.now());
+    }
+    else if (evento === "limpiar") {
+      alertasCargadas.clear(); camaraEnAlerta.clear(); pintarAlertas();
     }
     else if (evento === "atendida") {
       const a = alertasCargadas.get(datos.id);
@@ -297,6 +302,13 @@ const leer = (o, ruta) => ruta.split(".").reduce((x, k) => x?.[k], o);
 function escribir(o, ruta, v) { const k = ruta.split("."); const u = k.pop(); k.reduce((x, c) => (x[c] ??= {}), o)[u] = v; }
 $("#btn-ajustes").onclick = async () => {
   const aj = await api("/api/ajustes");
+  const cont = $("#clases-objeto");                 // las clases dependen del detector (COCO o vocabulario abierto)
+  cont.replaceChildren(...Object.keys(aj.reglas.objetos.clases || {}).map((nombre) => {
+    const l = el("label", "fila"), i = el("input");
+    i.type = "checkbox"; i.dataset.ruta = `reglas.objetos.clases.${nombre}`;
+    l.append(i, " " + nombre.charAt(0).toUpperCase() + nombre.slice(1));
+    return l;
+  }));
   document.querySelectorAll("#form-ajustes [data-ruta]").forEach((i) => {
     const v = leer(aj, i.dataset.ruta);
     if (i.type === "checkbox") i.checked = !!v; else i.value = v;
@@ -394,6 +406,19 @@ $("#btn-esqueleto").onclick = async () => {
   const b = $("#btn-esqueleto"), activo = b.getAttribute("aria-pressed") !== "true";
   b.setAttribute("aria-pressed", String(activo));
   await api("/api/ajustes", { method: "PUT", body: JSON.stringify({ privacidad: { solo_esqueleto: activo } }) });
+};
+
+// ------------------------------------------------------------------ borrar historial (entre pruebas o demostraciones)
+$("#btn-limpiar").onclick = async () => {
+  if (!confirm("¿Borrar todas las alertas y sus fotos?\n\nTambién se reinicia lo que VigIA aprendió de la escena " +
+               "(objetos tomados como parte del lugar y falsas alarmas marcadas). Las cámaras, zonas y ajustes se conservan.")) return;
+  try {
+    const r = await api("/api/reiniciar", { method: "POST" });
+    alertasCargadas.clear(); camaraEnAlerta.clear(); pintarAlertas();
+    $("#btn-limpiar").title = `Última vez: ${r.borradas} alertas borradas a las ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    alert(`No se pudo borrar el historial: ${e.message || e}`);
+  }
 };
 
 // ------------------------------------------------------------------ búsqueda con CLIP
