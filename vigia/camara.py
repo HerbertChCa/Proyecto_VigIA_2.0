@@ -54,7 +54,8 @@ class Lector:
         self._desfase = 0.0
         self._parar = False
         self._lock = threading.Lock()
-        threading.Thread(target=self._bucle, daemon=True).start()
+        self._hilo = threading.Thread(target=self._bucle, daemon=True)
+        self._hilo.start()
 
     def _abrir(self):
         if isinstance(self.fuente, int):
@@ -188,7 +189,11 @@ class Lector:
         self._rebobinar = True
 
     def detener(self):
+        """Pide parar y espera (hasta 3 s) a que el hilo suelte el video. En Windows un archivo abierto no se puede
+        borrar: sin esta espera, quitar una cámara dejaba el .mp4 en datos/videos."""
         self._parar = True
+        if self._hilo.is_alive() and threading.current_thread() is not self._hilo:
+            self._hilo.join(timeout=3.0)
 
 
 class Trabajador:

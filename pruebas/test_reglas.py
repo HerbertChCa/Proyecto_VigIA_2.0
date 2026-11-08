@@ -853,6 +853,62 @@ class PosicionesDeCamara(unittest.TestCase):
         self.assertIn("caida", tipos)
         self.assertIn("en_suelo", tipos)
 
+    def test_medidas_de_tendido_explican_la_decision(self):
+        """`medidas_tendido` (que usa el diagnóstico de videos) entrega los mismos números en que se apoya
+        `esta_tendido`: de pie queda lejos de los umbrales, aplastado contra el piso queda por debajo."""
+        from vigia.reglas import esta_tendido, medidas_tendido
+        de_pie = esqueleto(400, 480, "quieto", 0, 0, 1, 0)
+        conf = np.full(17, 0.9)
+        caja = _persona(1, de_pie).caja
+        alto = float(caja[3] - caja[1])
+        m = Muestra(0.0, caja, de_pie, conf)
+        d = medidas_tendido(m, alto)
+        self.assertGreaterEqual(d["pies_cadera"], 0.35)
+        self.assertAlmostEqual(d["conf_min"], 0.9)
+        self.assertFalse(esta_tendido(m, 60, alto))
+
+        aplastado = _comprimir(de_pie, 480, 0.2, 400)
+        m2 = Muestra(1.0, _persona(1, aplastado).caja, aplastado, conf)
+        d2 = medidas_tendido(m2, alto)
+        self.assertLess(d2["pies_cadera"], 0.35)
+        self.assertLess(d2["cadera_cabeza"], 0.33)
+        self.assertTrue(esta_tendido(m2, 60, alto))
+
+        conf_baja = conf.copy()
+        conf_baja[[15, 16]] = 0.1                     # tobillos sin confianza: no se puede medir cadera-pies
+        d3 = medidas_tendido(Muestra(0.0, caja, de_pie, conf_baja), alto)
+        self.assertIsNone(d3["pies_cadera"])
+        self.assertAlmostEqual(d3["conf_min"], 0.1)
+        self.assertAlmostEqual(d3["conf_tobillos"], 0.1)
+        self.assertAlmostEqual(d3["conf_cabeza"], 0.9)
+        self.assertEqual(d3["n_cabeza"], 5)
+
+    def test_cabeza_dudosa_no_decide_que_alguien_esta_tendido(self):
+        """Caso real (cámara alta, de noche): una persona de pie, con el tronco vertical y las piernas bien
+        detectadas, tenía la cabeza medida con 1 o 2 puntos casi sin confianza; esa medida saltaba alrededor del
+        umbral y daba «persona en el suelo». Con la cabeza dudosa se mira el ángulo del tronco; con la cabeza bien
+        vista, el cuerpo aplastado sigue detectándose."""
+        from vigia.reglas import esta_tendido, medidas_tendido
+        de_pie = esqueleto(400, 480, "quieto", 0, 0, 1, 0)
+        caja = _persona(1, de_pie).caja
+        alto = float(caja[3] - caja[1])
+        k = _comprimir(de_pie, 480, 0.65, 400)        # piernas «cortas» por la perspectiva (como en el video real); tronco vertical
+        caja_k = _persona(1, k).caja
+
+        bien = Muestra(0.0, caja_k, k, np.full(17, 0.9))
+        self.assertTrue(esta_tendido(bien, 60, alto))                 # cabeza bien vista: aplastado
+
+        conf = np.full(17, 0.9)
+        conf[[0, 1]] = 0.35                           # solo 2 puntos de la cabeza pasan 0.3
+        conf[[2, 3, 4]] = 0.05
+        dudosa = Muestra(0.0, caja_k, k, conf)
+        d = medidas_tendido(dudosa, alto)
+        self.assertEqual(d["n_cabeza"], 2)
+        self.assertIsNone(d["cadera_cabeza"])
+        self.assertIsNotNone(d["cadera_cabeza_cruda"])
+        self.assertFalse(esta_tendido(dudosa, 60, alto))              # de pie: el tronco está vertical
+        self.assertTrue(esta_tendido(dudosa, 60, alto, puntos_cabeza_min=1))   # con la opción anterior, falsa alarma
+
     def test_caida_de_costado_frente_a_la_camara(self):
         def poses(t):
             if t < 4:
@@ -1536,6 +1592,7 @@ class PausaDeVideo(unittest.TestCase):
                 for t in s.trabajadores.values():
                     t.detener()
                 s.alertas.cerrar()
+                s.encuesta.cerrar()
 
     def test_camara_en_vivo_no_se_pausa(self):
         from vigia.camara import Trabajador
@@ -1564,6 +1621,7 @@ class PausaDeVideo(unittest.TestCase):
                 for t in s.trabajadores.values():
                     t.detener()
                 s.alertas.cerrar()
+                s.encuesta.cerrar()
 
     def test_ruta_de_pausa(self):
         """La ruta se llama como lo haría el navegador (ASGI directo: no hace falta instalar httpx)."""
@@ -1614,6 +1672,7 @@ class PausaDeVideo(unittest.TestCase):
                     self.assertEqual(estado, 404)
                 finally:
                     sis.alertas.cerrar()
+                    sis.encuesta.cerrar()
 
         with tempfile.TemporaryDirectory() as d:
             asyncio.run(probar(d))
@@ -1739,6 +1798,7 @@ class VideoSubidoACompas(unittest.TestCase):
                 if t.lector:
                     t.lector.detener()
                 s.alertas.cerrar()
+                s.encuesta.cerrar()
 
 
 class RendimientoEnVivo(unittest.TestCase):
@@ -1930,6 +1990,7 @@ class SegundaMirada(unittest.TestCase):
                 for w in s.trabajadores.values():
                     w.detener()
                 s.alertas.cerrar()
+                s.encuesta.cerrar()
 
 
 class ChequeoPrevio(unittest.TestCase):
@@ -1992,6 +2053,7 @@ class ChequeoPrevio(unittest.TestCase):
                 for w in s.trabajadores.values():
                     w.detener()
                 s.alertas.cerrar()
+                s.encuesta.cerrar()
 
     def test_retos_de_arrebato_y_forcejeo(self):
         from vigia.reto import POR_ID
@@ -2054,6 +2116,7 @@ class SegundaMiradaEnLaCamara(unittest.TestCase):
                 if t.revisor:
                     t.revisor.detener()
                 s.alertas.cerrar()
+                s.encuesta.cerrar()
 
 
 class CondicionesReales(unittest.TestCase):
@@ -2171,3 +2234,4 @@ class ZonasEnVideoPausado(unittest.TestCase):
                 for w in s.trabajadores.values():
                     w.detener()
                 s.alertas.cerrar()
+                s.encuesta.cerrar()

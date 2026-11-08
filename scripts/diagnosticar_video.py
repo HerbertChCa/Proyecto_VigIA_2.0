@@ -36,7 +36,7 @@ sys.path.insert(0, str(RAIZ))
 from vigia.dibujo import dibujar  # noqa: E402
 from vigia.historial import Historial  # noqa: E402
 from vigia.objetos import FiltroObjetos  # noqa: E402
-from vigia.reglas import PORTATILES, Reglas, sostiene  # noqa: E402
+from vigia.reglas import PORTATILES, Reglas, angulo_tronco, esta_tendido, medidas_tendido, sostiene  # noqa: E402
 
 
 def movimiento_de_camara(previo, actual) -> float:
@@ -138,12 +138,33 @@ def main():
                 lleva.append(f"{o.clase}#{o.id}:{'+'.join(map(str, q)) or '-'}")
                 portes[len(q)] += 1
         dos_o_mas += len(obs.personas) >= 2
+        num = lambda x: "-" if x is None else f"{x:.2f}"
+        postura = []                           # para entender una alerta de «persona en el suelo» o de caída
+        for p in obs.personas:
+            pista = hist.personas.get(p.id)
+            if pista is None or not pista.muestras:
+                continue
+            alto_p = pista.alto_de_pie(t, 6.0)
+            cc = cfg["reglas"]["caida"]
+            d = medidas_tendido(pista.muestras[-1], alto_p, cc.get("puntos_cabeza_min", 3))
+            marca = "TENDIDO" if esta_tendido(pista.muestras[-1], cc["angulo_horizontal"], alto_p,
+                                              cc.get("puntos_cabeza_min", 3)) else "de pie"
+            m = pista.muestras[-1]
+            ang = angulo_tronco(m)
+            postura.append(
+                f"#{p.id}:{marca} pies-cad={num(d['pies_cadera'])} cad-cab={num(d['cadera_cabeza'])} (cruda {num(d['cadera_cabeza_cruda'])}) "
+                f"canilla={num(d['canilla'])} "
+                f"conf[cabeza={num(d['conf_cabeza'])} ({d['n_cabeza']} pts) cadera={num(d['conf_cadera'])} "
+                f"rodillas={num(d['conf_rodillas'])} tobillos={num(d['conf_tobillos'])}] "
+                f"caja={m.caja[2] - m.caja[0]:.0f}x{m.caja[3] - m.caja[1]:.0f} alto_ref={d['alto']:.0f} "
+                f"tronco_grados={'-' if ang is None else f'{ang:.0f}'}")
         filas.append({
             "t": round(t, 2), "personas": " ".join(f"#{p.id}" for p in obs.personas),
             "objetos_detector": " ".join(f"{o.clase}:{o.conf:.2f}" for o in nuevos),
             "objetos_confirmados": " ".join(f"{o.clase}#{o.id}" for o in obs.objetos),
             "quien_lleva_cada_objeto": " ".join(lleva),
             "vel_extremidades_max": " ".join(f"#{pid}:{v:.1f}" for pid, (_, v) in reglas._rap.items()),
+            "postura": " | ".join(postura),
             "cuerpo_a_cuerpo": juntos, "mov_camara_px": round(mov, 1),
             "alertas": " | ".join(e.mensaje for e in ev)})
         en_alerta = {p.id for p in obs.personas for e in ev for c in e.cajas if np.allclose(p.caja, c)}

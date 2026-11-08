@@ -182,6 +182,14 @@ class Sistema:
             extra.append(cam)
             self._f_camaras.write_text(json.dumps(extra, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def cerrar(self) -> None:
+        """Detiene las cámaras y cierra las bases de datos (alertas y encuesta). En Windows un archivo abierto no
+        se puede borrar ni mover, así que conviene llamarlo al apagar el sistema y al terminar cada prueba."""
+        for t in list(self.trabajadores.values()):
+            t.detener()
+        self.alertas.cerrar()
+        self.encuesta.cerrar()
+
     def quitar_camara(self, cid: str) -> bool:
         t = self.trabajadores.pop(cid, None)
         if t:
