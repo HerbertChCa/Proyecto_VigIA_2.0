@@ -61,6 +61,14 @@ button, input, select { font: inherit; color: inherit; }
   font-size: 13px; line-height: 1; padding: 4px 8px; }
 .camara-cab .pausa:hover { border-color: var(--acento); }
 .camara-cab .pausa.activa { border-color: var(--acento); color: var(--acento); }
+.camara-cab .modo { background: none; border: 1px solid var(--borde); border-radius: 6px; color: #cdd3db; cursor: pointer;
+  font-size: 12px; padding: 4px 8px; white-space: nowrap; }
+.camara-cab .modo:hover, .camara-cab .modo.activa { border-color: var(--acento); }
+.camara-cab .precision { font-size: 11px; padding: 2px 7px; border-radius: 999px; white-space: nowrap; cursor: help;
+  border: 1px solid currentColor; }
+.camara-cab .precision.alta { color: #3ecf8e; }
+.camara-cab .precision.media { color: #e8b84a; }
+.camara-cab .precision.baja { color: #ef6b6b; }
 .video { position: relative; background: #050607; aspect-ratio: 16 / 9; }
 .video img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .video .estado { position: absolute; inset: 0; display: grid; place-items: center; color: var(--tenue); text-align: center; padding: 20px; }
@@ -183,3 +191,8 @@ legend { color: var(--texto); padding: 0 6px; font-weight: 600; }
 .descarga progress { width: 100%; height: 10px; }
 .alerta .veces { margin-left: 6px; padding: 0 6px; border-radius: 999px; background: rgba(229, 83, 75, .18); color: #ff9b94;
   font-size: 11px; letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
+@media (max-width: 600px) {          /* en el celular los botones de la cámara bajan a otra línea en vez de cortarse */
+  .camara-cab { flex-wrap: wrap; row-gap: 6px; }
+  .camara-cab h3 { flex: 1 0 auto; }
+  .camara-cab .meta { order: 9; flex-basis: 100%; margin-left: 0; }
+}

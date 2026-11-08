@@ -507,6 +507,21 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
                                 status_code=400)
         return JSONResponse({"ok": True, "pausado": quiere})
 
+    async def modo_video(req: Request):
+        """Video subido: {"detallado": true} = cuadro a cuadro (cámara lenta si hace falta); false = tiempo real."""
+        t = sis.trabajadores.get(req.path_params["cid"])
+        if t is None:
+            return JSONResponse({"error": "La cámara ya no existe."}, status_code=404)
+        try:
+            datos = await req.json()
+        except ValueError:
+            datos = {}
+        quiere = bool(datos.get("detallado", not t.estado.get("detallado", True)))
+        if not t.modo_detallado(quiere):
+            return JSONResponse({"error": "Solo los videos subidos tienen modo detallado; una cámara en vivo siempre "
+                                          "va en tiempo real."}, status_code=400)
+        return JSONResponse({"ok": True, "detallado": quiere})
+
     async def reiniciar(_):
         return JSONResponse({"ok": True, "borradas": sis.reiniciar()})
 
@@ -528,6 +543,7 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
         Route("/api/alertas.csv", alertas_csv),
         Route("/api/reiniciar", reiniciar, methods=["POST"]),
         Route("/api/camaras/{cid}/pausa", pausa, methods=["POST"]),
+        Route("/api/camaras/{cid}/modo", modo_video, methods=["POST"]),
         Route("/aviso", aviso),
         Route("/capturas/{nombre}", archivo_captura),
         Route("/api/camaras/{cid}/zonas", zonas, methods=["GET", "PUT"]),

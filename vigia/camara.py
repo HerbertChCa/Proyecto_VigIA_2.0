@@ -30,12 +30,13 @@ class Lector:
     (antes se reproducía a su velocidad real y, a 1-2 cuadros analizados por segundo, un tirón de mochila de dos
     segundos quedaba entre dos cuadros y la mochila nunca llegaba a confirmarse)."""
 
-    def __init__(self, fuente, fps_analisis: float = 10, repetir: bool = False):
+    def __init__(self, fuente, fps_analisis: float = 10, repetir: bool = False, detallado: bool = True):
         self.fuente = int(fuente) if str(fuente).isdigit() else str(fuente)
         self.es_archivo = isinstance(self.fuente, str) and not self.fuente.lower().startswith(("rtsp", "http"))
         self.es_enlace = isinstance(self.fuente, str) and self.fuente.lower().startswith(("http://", "https://"))
         self.fps_analisis = max(1.0, float(fps_analisis))
         self.repetir = repetir
+        self.detallado = detallado        # video: True = cuadro a cuadro (cámara lenta), False = a su velocidad real
         self.frame: Optional[np.ndarray] = None
         self.conectada = False
         self.finito = self.es_archivo     # tiene duración (archivo o enlace a un .mp4): se puede pausar
@@ -105,24 +106,44 @@ class Lector:
             self.conectada = True
 
     def _leer_video(self, cap, fps_archivo: float):
+        """Dos modos, que se pueden cambiar mientras corre (botón de la tarjeta):
+        - detallado: entrega 1 de cada `salto` cuadros y espera a que el análisis lo tome (cámara lenta si hace falta);
+        - tiempo real: el video corre a su velocidad y el análisis toma el cuadro más reciente, como una cámara en vivo."""
         salto = max(1, round(fps_archivo / self.fps_analisis))   # p. ej. un video de 60 fps: 1 de cada 6 cuadros
         self.paso_video = salto / fps_archivo
         leidos = 0
+        ref = None                                  # (instante, cuadro) desde el que corre el tiempo real
         while not self._parar:
             if self._rebobinar:
                 self._rebobinar = False
                 self._desfase = self.t_video + 1.0  # el reloj del análisis sigue avanzando: nunca vuelve atrás
                 self.vuelta += 1
                 self.terminado = False
+                ref = None
                 if not self.es_archivo:
                     return                          # un enlace se vuelve a abrir desde el principio
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 leidos = 0
-            if self.pausado or self.terminado or not self._tomado:
-                time.sleep(0.005)
+            if self.pausado or self.terminado:
+                ref = None
+                time.sleep(0.01)
                 continue
+            if self.detallado:
+                ref = None
+                if not self._tomado:
+                    time.sleep(0.005)
+                    continue
+                avanzar = salto
+            else:
+                if ref is None:
+                    ref = (time.monotonic(), leidos)
+                objetivo = ref[1] + int((time.monotonic() - ref[0]) * fps_archivo)
+                if objetivo <= leidos:
+                    time.sleep(min(0.01, 0.5 / fps_archivo))
+                    continue
+                avanzar = objetivo - leidos         # los cuadros que el análisis no alcanza se saltan
             ok = True
-            for _ in range(salto - 1):              # grab() salta cuadros sin convertirlos: más liviano que read()
+            for _ in range(avanzar - 1):            # grab() salta cuadros sin convertirlos: más liviano que read()
                 ok = cap.grab()
                 if not ok:
                     break
@@ -190,6 +211,9 @@ class Trabajador:
         self._pausa_desde: Optional[float] = None   # instante en que se pausó (solo videos subidos y demo)
         self._pausa_total = 0.0                     # segundos en pausa acumulados: el reloj del análisis no avanza
         self._vuelta = 0                            # vuelta del video que se está analizando
+        self._n_cuadro = 0
+        self._ms: dict[str, float] = {}             # milisegundos de cada etapa en el último cuadro
+        self._inicio_paso = time.perf_counter()
         self.lector = None
         self.sim = None
         self.detector = None
@@ -205,7 +229,8 @@ class Trabajador:
             else:
                 from .modelos import AnalizadorRostros, DetectorYOLO
                 proc = self.cfg["procesamiento"]
-                self.lector = Lector(self.fuente, proc["fps_objetivo"], bool(proc.get("repetir_videos", False)))
+                self.lector = Lector(self.fuente, proc["fps_objetivo"], bool(proc.get("repetir_videos", False)),
+                                     bool(proc.get("videos_detallado", True)))
                 self.detector = DetectorYOLO(self.cfg["modelos"])
                 self.rostros = AnalizadorRostros(self.cfg["modelos"]["rostros"], self.cfg["modelos"]["emociones"])
         except Exception as e:  # p. ej. falta instalar ultralytics
@@ -255,6 +280,16 @@ class Trabajador:
             self.estado["terminado"] = False
         return True
 
+    def modo_detallado(self, detallado: bool) -> bool:
+        """Video subido: True = analiza cada segundo completo (cámara lenta si la PC no alcanza); False = a velocidad
+        real, saltando lo que no alcanza a ver (así se comporta una cámara en vivo)."""
+        if self.lector is None or not self.lector.finito:
+            return False
+        self.lector.detallado = detallado
+        self.estado["detallado"] = detallado
+        self._tiempos.clear()
+        return True
+
     def _reloj(self) -> float:
         """Hora para el análisis: la del sistema menos el tiempo que el video estuvo en pausa."""
         ahora = self._pausa_desde if self._pausa_desde is not None else time.time()   # en pausa, quieto
@@ -290,6 +325,7 @@ class Trabajador:
                 for r in obs.rostros:
                     r.probs = None
         else:
+            inicio = time.perf_counter()
             self.estado["conectada"] = self.lector.conectada
             video = self.lector.finito
             if video:
@@ -301,7 +337,8 @@ class Trabajador:
                 if tomado is None:
                     return                               # el lector todavía no tiene el cuadro siguiente
                 frame, t = tomado                        # reloj del análisis = segundo del video
-                self.detector.cada_n = int(self.cfg["procesamiento"].get("objetos_cada_n_frames_videos", 2))
+                self.detector.cada_n = (int(self.cfg["procesamiento"].get("objetos_cada_n_frames_videos", 2))
+                                        if self.lector.detallado else None)
             else:
                 frame = self.lector.ultimo()
                 if frame is None:
@@ -312,14 +349,22 @@ class Trabajador:
                 esc = ancho_max / frame.shape[1]
                 frame = cv2.resize(frame, (ancho_max, int(frame.shape[0] * esc)))
             obs = self.detector.procesar(frame, t)
-            if self.rostros.disponible and (priv["difuminar_rostros"] or priv["analizar_emociones"]):
+            t_rostros = time.perf_counter()
+            self._n_cuadro += 1
+            cada_rostros = max(1, int(self.cfg["procesamiento"].get("rostros_cada_n_frames", 1)))
+            if (self.rostros.disponible and (priv["difuminar_rostros"] or priv["analizar_emociones"])
+                    and self._n_cuadro % cada_rostros == 0):
+                # en los otros cuadros no hay rostros: se difumina la cabeza estimada con la pose (cajas_cabeza)
                 from .modelos import asignar_rostros
-                obs.rostros = self.rostros.detectar(frame, priv["analizar_emociones"])
+                obs.rostros = self.rostros.detectar(frame, priv["analizar_emociones"],
+                                                    int(self.cfg["procesamiento"].get("ancho_rostros", 0)))
                 asignar_rostros(obs.rostros, obs.personas)
+            self._ms = {**getattr(self.detector, "ms", {}), "rostros": 1000 * (time.perf_counter() - t_rostros)}
+            self._inicio_paso = inicio
 
         h, w = frame.shape[:2]
         if not self.demo:            # los objetos del modo demo ya vienen limpios
-            if not self.lector.finito and len(self._tiempos) > 5:
+            if not (self.lector.finito and self.lector.detallado) and len(self._tiempos) > 5:
                 # cámara en vivo en una PC lenta: si el detector de objetos pasa pocas veces por segundo, la ventana
                 # para juntar 3 detecciones se alarga (con 4 s fijos, a 1 cuadro por segundo nada se confirmaba)
                 fps_med = (len(self._tiempos) - 1) / max(1e-3, self._tiempos[-1] - self._tiempos[0])
@@ -352,12 +397,14 @@ class Trabajador:
         self._tiempos.append(ahora)
         fps = (len(self._tiempos) - 1) / (self._tiempos[-1] - self._tiempos[0]) if len(self._tiempos) > 1 else 0.0
         velocidad = None
-        if self.lector is not None and self.lector.finito:
+        if self.lector is not None and self.lector.finito and self.lector.detallado:
             velocidad = round(fps * self.lector.paso_video, 2)      # segundos de video analizados por segundo real
             enc = (f"{self.nombre}  |  video {t:5.1f} s  |  {fps:.1f} fps"
                    + (f" (camara lenta x{velocidad:.2f})" if velocidad < 0.95 else "") + f"  |  {len(obs.personas)} personas")
         else:
             enc = f"{self.nombre}  |  {time.strftime('%H:%M:%S')}  |  {fps:.1f} fps  |  {len(obs.personas)} personas"
+            if self.lector is not None and self.lector.finito:
+                enc = f"{self.nombre}  |  video {t:5.1f} s (tiempo real)  |  {fps:.1f} fps  |  {len(obs.personas)} personas"
         if self.demo:
             enc += "  |  MODO DEMO (escena simulada)"
         if esqueleto:
@@ -370,6 +417,18 @@ class Trabajador:
         self.estado.update(fps=round(fps, 1), personas=len(obs.personas),
                            emociones=dict(Counter(emociones.values())), error=None, ancho=w, alto=h,
                            pausable=self.pausable, pausado=self._pausa_desde is not None, velocidad=velocidad)
+        if not self.demo:
+            detallado = bool(self.lector.finito and self.lector.detallado)
+            # precisión esperada según los cuadros que se analizan por cada segundo de lo que pasa delante de la
+            # cámara: un tirón o un golpe dura 1-2 s y las reglas necesitan verlo en varios cuadros
+            por_segundo = self.cfg["procesamiento"]["fps_objetivo"] if detallado else fps
+            total = 1000 * (time.perf_counter() - self._inicio_paso)
+            etapas = {k: round(v) for k, v in self._ms.items()}
+            etapas["reglas y dibujo"] = max(0, round(total - sum(self._ms.values())))
+            self.estado.update(
+                detallado=detallado if self.lector.finito else None,
+                precision="alta" if por_segundo >= 7 else "media" if por_segundo >= 4 else "baja",
+                etapas=etapas, aceleracion=getattr(self.detector, "aceleracion", None))
 
     def actualizar_cfg(self, cfg: dict):
         self.cfg = cfg

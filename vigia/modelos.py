@@ -1,4 +1,4 @@
-"""Modelos de visión. Todo corre en CPU.
+"""Modelos de visión. Corren en CPU; si hay una tarjeta gráfica NVIDIA (CUDA) la usan solos.
 
 - YOLO11n-pose: detecta personas, estima 17 puntos del cuerpo y las sigue entre frames (ByteTrack).
 - YOLO11n: detecta mochilas, bolsos y maletas, también con seguimiento.
@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +30,64 @@ def ruta_modelo(ruta: str) -> str:
     if p.exists() or p.suffix != ".pt":
         return str(p)
     return p.name
+
+def ruta_acelerada(ruta: str) -> Optional[Path]:
+    """Carpeta del modelo exportado a OpenVINO (scripts/acelerar_modelos.py), si existe: `yolo11n-pose.pt` ->
+    `yolo11n-pose_openvino_model/`. En CPU Intel o AMD suele correr 2 a 3 veces más rápido que el .pt."""
+    p = Path(ruta)
+    candidatos = [p.with_name(p.stem + "_openvino_model")]
+    if not p.is_absolute() and len(p.parts) == 1:      # solo el nombre (ultralytics lo bajó): se busca en models/
+        candidatos.append(RAIZ / "models" / (p.stem + "_openvino_model"))
+    for c in candidatos:
+        if (c / "metadata.yaml").exists():
+            return c
+    return None
+
+
+def _imgsz_exportado(carpeta: Path) -> Optional[int]:
+    """Tamaño de imagen con el que se exportó (un modelo exportado solo acepta ese tamaño)."""
+    try:
+        import yaml
+        datos = yaml.safe_load((carpeta / "metadata.yaml").read_text(encoding="utf-8")) or {}
+        tam = datos.get("imgsz")
+        return int(max(tam)) if isinstance(tam, (list, tuple)) else int(tam) if tam else None
+    except Exception:  # noqa: BLE001 - un metadata raro: se usa el .pt
+        return None
+
+
+def dispositivo() -> str:
+    """'0' (la primera tarjeta NVIDIA) si PyTorch la ve; si no, 'cpu'."""
+    try:
+        import torch
+        return "0" if torch.cuda.is_available() else "cpu"
+    except Exception:  # noqa: BLE001
+        return "cpu"
+
+
+def cargar_yolo(ruta: str, tarea: str, imgsz: int, cfg: dict):
+    """Carga un modelo YOLO de la forma más rápida disponible y devuelve (modelo, imgsz, cómo corre).
+
+    1. Con tarjeta NVIDIA: el .pt en la GPU (en media precisión).
+    2. Sin ella, si se exportó a OpenVINO (python scripts/acelerar_modelos.py): la versión exportada.
+    3. Si no, el .pt en la CPU, como siempre.
+    Si la versión exportada falla al cargar, se vuelve al .pt: acelerar nunca debe dejar a VigIA sin modelo."""
+    from ultralytics import YOLO
+    modo = str(cfg.get("aceleracion", "auto")).lower()      # auto | openvino | no
+    disp = dispositivo()
+    if modo != "no" and disp == "cpu":
+        carpeta = ruta_acelerada(ruta)
+        if carpeta is not None:
+            tam = _imgsz_exportado(carpeta) or imgsz
+            if tam != imgsz:
+                log.warning("%s se exportó a %d px y config.yaml pide %d px: se usa %d. Para cambiarlo, vuelva a "
+                            "correr scripts/acelerar_modelos.py.", carpeta.name, tam, imgsz, tam)
+            try:
+                return YOLO(str(carpeta), task=tarea), tam, "openvino"
+            except Exception:  # noqa: BLE001
+                log.exception("No se pudo cargar %s; se usa el modelo normal (.pt)", carpeta)
+    modelo = YOLO(ruta)
+    return modelo, imgsz, ("gpu" if disp != "cpu" else "cpu")
+
 
 # Las cámaras se turnan para usar los modelos: correr varias inferencias a la vez en CPU no es más rápido,
 # solo reparte los núcleos entre todas y deja sin CPU al servidor web.
@@ -86,22 +145,28 @@ class DetectorYOLO:
     """Un detector por cámara: el seguidor de YOLO guarda estado propio por instancia."""
 
     def __init__(self, cfg: dict):
-        from ultralytics import YOLO  # se importa aquí para que el modo demo no lo necesite
         self.cfg = cfg
         _fijar_hilos()
-        self.pose = YOLO(ruta_modelo(cfg["pose"]))
+        self.disp = dispositivo()
+        self.media = self.disp != "cpu"          # media precisión en GPU: casi el doble de rápido
+        self.pose, self.imgsz_pose, modo_pose = cargar_yolo(ruta_modelo(cfg["pose"]), "pose", cfg["tamano_imagen"], cfg)
         abierto = modelo_abierto(cfg)
+        tam_obj = cfg.get("tamano_imagen_objetos", cfg["tamano_imagen"])
         if abierto:
-            self.obj = YOLO(abierto)
+            self.obj, self.imgsz_obj, modo_obj = cargar_yolo(abierto, "detect", tam_obj, cfg)
             vocab = vocabulario(cfg)
             self._mapa = {int(i): vocab.get(n, n) for i, n in self.obj.names.items()}
             self._clases, self._conf = None, float(cfg.get("confianza_objetos_abierto", 0.15))
             log.info("Detector de objetos de vocabulario abierto: %s", ", ".join(sorted(set(self._mapa.values()))))
         else:
-            self.obj = YOLO(ruta_modelo(cfg["objetos"]))
+            self.obj, self.imgsz_obj, modo_obj = cargar_yolo(ruta_modelo(cfg["objetos"]), "detect", tam_obj, cfg)
             # umbral bajo a propósito: decide el filtro de objetos (confianza media y varias detecciones seguidas)
             self._mapa, self._clases, self._conf = CLASES_OBJETO, list(CLASES_OBJETO), 0.20
         self.abierto = abierto is not None
+        self.aceleracion = {"personas": modo_pose, "objetos": modo_obj}
+        log.info("Modelos: personas en %s (%d px), objetos en %s (%d px)", modo_pose, self.imgsz_pose, modo_obj,
+                 self.imgsz_obj)
+        self.ms = {"personas": 0.0, "objetos": 0.0}   # milisegundos de la última pasada de cada modelo
         self.n = 0
         self.cada_n: int | None = None      # si se fija, reemplaza objetos_cada_n_frames (videos subidos: 2)
         self._ultimos_objetos: list[Objeto] = []
@@ -120,9 +185,11 @@ class DetectorYOLO:
     def procesar(self, frame: np.ndarray, t: float) -> Observacion:
         c = self.cfg
         obs = Observacion(t=t)
+        t0 = time.perf_counter()
         with _INFERENCIA:
-            r = self.pose.track(frame, persist=True, tracker="bytetrack.yaml", imgsz=c["tamano_imagen"],
-                                conf=c["confianza"], classes=[0], verbose=False)[0]
+            r = self.pose.track(frame, persist=True, tracker="bytetrack.yaml", imgsz=self.imgsz_pose,
+                                conf=c["confianza"], classes=[0], verbose=False, device=self.disp, half=self.media)[0]
+        self.ms["personas"] = 1000 * (time.perf_counter() - t0)
         if r.boxes is not None and r.boxes.id is not None:
             cajas = r.boxes.xyxy.cpu().numpy()
             ids = r.boxes.id.int().cpu().tolist()
@@ -137,10 +204,12 @@ class DetectorYOLO:
         if self.n % max(1, self.cada_n or c["objetos_cada_n_frames"]) == 0:
             # los objetos son más chicos que las personas: se buscan en una imagen más grande, con un seguidor
             # que acepta detecciones de baja confianza (una mochila puesta o una prenda en la mano)
+            t0 = time.perf_counter()
             with _INFERENCIA:
-                ro = self.obj.track(frame, persist=True, tracker=SEGUIDOR_OBJETOS,
-                                    imgsz=c.get("tamano_imagen_objetos", c["tamano_imagen"]),
-                                    conf=self._conf, classes=self._clases, verbose=False)[0]
+                ro = self.obj.track(frame, persist=True, tracker=SEGUIDOR_OBJETOS, imgsz=self.imgsz_obj,
+                                    conf=self._conf, classes=self._clases, verbose=False,
+                                    device=self.disp, half=self.media)[0]
+            self.ms["objetos"] = 1000 * (time.perf_counter() - t0)
             self._ultimos_objetos = []
             if ro.boxes is not None and ro.boxes.id is not None:
                 for caja, oid, cls, cf in zip(ro.boxes.xyxy.cpu().numpy(), ro.boxes.id.int().cpu().tolist(),
@@ -178,16 +247,23 @@ class AnalizadorRostros:
     def disponible(self) -> bool:
         return self.det is not None
 
-    def detectar(self, frame: np.ndarray, emociones: bool) -> list[Rostro]:
+    def detectar(self, frame: np.ndarray, emociones: bool, ancho_max: int = 0) -> list[Rostro]:
+        """`ancho_max`: YuNet busca los rostros en una copia reducida a ese ancho (antes recorría la imagen completa
+        en cada cuadro, lo que en una laptop costaba casi tanto como la pose). Las cajas y las marcas se devuelven
+        en coordenadas de la imagen original, y la expresión se lee del rostro a resolución completa."""
         if self.det is None:
             return []
         h, w = frame.shape[:2]
-        self.det.setInputSize((w, h))
-        _, caras = self.det.detect(frame)
+        esc = ancho_max / w if 0 < ancho_max < w else 1.0
+        chica = cv2.resize(frame, (int(w * esc), int(h * esc))) if esc < 1 else frame
+        self.det.setInputSize((chica.shape[1], chica.shape[0]))
+        _, caras = self.det.detect(chica)
         out = []
         if caras is None:
             return out
         for f in caras:
+            f = np.asarray(f, dtype=np.float32).copy()
+            f[:14] /= esc                                   # caja (x, y, ancho, alto) y 5 marcas, a tamaño original
             x, y, cw, ch = f[:4]
             rostro = Rostro(caja=np.array([x, y, x + cw, y + ch], dtype=float))
             if emociones and self.fer is not None:

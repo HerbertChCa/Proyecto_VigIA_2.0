@@ -19,6 +19,7 @@ HILOS = max(1, (os.cpu_count() or 2) - 1)
 for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
     os.environ.setdefault(_var, str(HILOS))
 
+from .rendimiento import aplicar_perfil  # noqa: E402
 from .servidor import RAIZ, crear_app, ip_local  # noqa: E402
 
 
@@ -30,9 +31,14 @@ def main():
     ap.add_argument("--sin-navegador", action="store_true")
     ap.add_argument("--feria", action="store_true",
                     help="modo feria: retos con tiempos cortos y encuesta abierta a los celulares de la red local")
+    ap.add_argument("--rapido", action="store_true",
+                    help="perfil rápido: imágenes más chicas para analizar más cuadros por segundo en vivo (feria)")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
     cfg = yaml.safe_load(Path(a.config).read_text(encoding="utf-8"))
+    perfil = aplicar_perfil(cfg, "rapido" if a.rapido else cfg.get("procesamiento", {}).get("perfil"))
+    if perfil != "normal":
+        print(f"Perfil de rendimiento: {perfil}")
     datos = Path(a.datos)
     if a.demo:
         datos = datos / "demo"

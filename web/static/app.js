@@ -42,7 +42,7 @@ function pintarCamaras() {
     if (!tarjeta) {
       tarjeta = el("article", "camara"); tarjeta.dataset.id = c.id;
       const cab = el("div", "camara-cab");
-      cab.append(el("h3", null, c.nombre), el("span", "meta"));
+      cab.append(el("h3", null, c.nombre), el("span", "meta"), el("span", "precision"));
       const quitar = el("button", "quitar", "✕"); quitar.title = "Quitar cámara";
       quitar.onclick = async () => {
         if (!confirm(`¿Quitar la cámara «${c.nombre}»?`)) return;
@@ -73,7 +73,24 @@ function pintarCamaras() {
           pausa.disabled = false;
         }
       };
-      cab.append(pausa, quitar);
+      // Video subido: «Detallado» analiza cada segundo completo (cámara lenta si la PC no alcanza);
+      // «Tiempo real» lo pasa a su velocidad y se salta lo que no alcanza a ver, igual que una cámara en vivo
+      const modo = el("button", "modo"); modo.hidden = true;
+      modo.onclick = async () => {
+        const ahora = estado.camaras.find((x) => x.id === c.id) || {};
+        const quiere = !ahora.detallado;
+        modo.disabled = true;
+        try {
+          await api(`/api/camaras/${c.id}/modo`, { method: "POST", body: JSON.stringify({ detallado: quiere }) });
+          if (ahora.id) ahora.detallado = quiere;
+          pintarCamaras();
+        } catch (e) {
+          alert(`No se pudo cambiar el modo del video: ${e.message}`);
+        } finally {
+          modo.disabled = false;
+        }
+      };
+      cab.append(modo, pausa, quitar);
       const video = el("div", "video");
       const img = el("img"); img.alt = `Video de ${c.nombre}`;
       // Cada cuadro se pide por separado en vez de mantener un video MJPEG abierto: el navegador solo admite
@@ -96,6 +113,28 @@ function pintarCamaras() {
     tarjeta.querySelector(".meta").textContent = c.terminado ? `video terminado · ${c.personas} personas`
       : c.pausado ? `en pausa · ${c.personas} personas`
       : `${c.fps.toFixed(1)} fps${lento} · ${c.personas} personas`;
+    const modo = tarjeta.querySelector(".modo");
+    modo.hidden = c.detallado == null;
+    modo.textContent = c.detallado ? "Detallado" : "Tiempo real";
+    modo.title = c.detallado
+      ? "Analiza cada segundo del video completo (va en cámara lenta si la PC no alcanza). Clic: tiempo real"
+      : "El video va a su velocidad y se salta lo que la PC no alcanza a analizar. Clic: detallado";
+    modo.classList.toggle("activa", !!c.detallado);
+    // precisión esperada: cuántos cuadros se analizan por cada segundo de lo que pasa frente a la cámara
+    const prec = tarjeta.querySelector(".precision");
+    prec.hidden = !c.precision;
+    if (c.precision) {
+      prec.textContent = `precisión ${c.precision}`;
+      prec.className = `precision ${c.precision}`;
+      const etapas = Object.entries(c.etapas || {}).map(([k, v]) => `${k}: ${v} ms`).join(", ");
+      const acel = c.aceleracion ? ` · modelos: personas en ${c.aceleracion.personas}, objetos en ${c.aceleracion.objetos}` : "";
+      prec.title = {
+        alta: "7 o más cuadros por segundo de acción: se ven los golpes y los tirones.",
+        media: "4 a 7 cuadros por segundo: se pueden perder los golpes más rápidos.",
+        baja: "Menos de 4 cuadros por segundo: los tirones y golpes pueden caer entre dos cuadros. " +
+          "Use el perfil rápido (python -m vigia --rapido), acelere los modelos o deje una sola cámara.",
+      }[c.precision] + `\nCada cuadro: ${etapas}${acel}`;
+    }
     const boton = tarjeta.querySelector(".pausa");
     boton.hidden = !c.pausable;
     boton.textContent = c.terminado ? "↻" : c.pausado ? "▶" : "⏸";

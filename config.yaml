@@ -27,6 +27,9 @@ modelos:
   tamano_imagen: 480           # menor = más rápido en CPU
   tamano_imagen_objetos: 640   # los objetos son chicos: una mochila a 4 m casi no se ve a 480 (si va lento, baje a 480)
   confianza: 0.40
+  # auto = si existe la versión OpenVINO de un modelo (python scripts/acelerar_modelos.py) se usa esa, 2-3 veces
+  # más rápida en CPU; con tarjeta NVIDIA se usa la GPU. "no" = siempre el .pt en CPU
+  aceleracion: auto
   objetos_cada_n_frames: 3     # el detector de objetos corre 1 de cada N frames (2 = detecta mejor, más lento)
   # Vocabulario abierto (YOLO-World): reconoce objetos por su nombre (ropa, saco, tablet…), no solo las
   # 80 clases de COCO. Se prepara una vez, con internet:  python scripts/preparar_vocabulario.py
@@ -63,9 +66,15 @@ modelos:
 
 procesamiento:
   fps_objetivo: 10             # frames analizados por segundo y por cámara
+  # normal = lo de este archivo; rapido = imágenes más chicas para llegar a ~10 cuadros por segundo en vivo
+  # en una laptop sin tarjeta gráfica (también: python -m vigia --rapido). Vea vigia/rendimiento.py
+  perfil: normal
+  rostros_cada_n_frames: 2     # YuNet busca rostros 1 de cada N cuadros; en los demás se difumina con la pose
+  ancho_rostros: 480           # y los busca en una copia de este ancho (los rostros cercanos se ven igual)
   # Videos subidos: se analizan fps_objetivo cuadros por cada segundo de video, aunque la PC sea lenta (el video
   # se ve en cámara lenta, pero no se salta nada). Al terminar quedan en el último cuadro; ▶ los repite.
   repetir_videos: false        # true = vuelven a empezar solos (útil en una feria, sin nadie al lado)
+  videos_detallado: true       # false = los videos subidos empiezan en «tiempo real» (como una cámara en vivo)
   objetos_cada_n_frames_videos: 2   # en los videos subidos el detector de objetos corre 1 de cada 2 cuadros
   ancho_max: 960               # se reduce el frame antes de analizarlo
 

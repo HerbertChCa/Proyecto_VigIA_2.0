@@ -1721,6 +1721,11 @@ class VideoSubidoACompas(unittest.TestCase):
                 self.assertTrue(np.allclose(t.detector.vistos, [0.1, 0.2, 0.3, 0.4], atol=0.02), t.detector.vistos)
                 self.assertEqual(t.detector.cada_n, 2)
                 self.assertIsNotNone(t.estado["velocidad"])
+                self.assertEqual(t.estado["precision"], "alta")          # detallado: 10 cuadros por segundo de video
+                self.assertIn("rostros", t.estado["etapas"])
+                self.assertTrue(t.modo_detallado(False))
+                self.assertFalse(t.lector.detallado)
+                t.modo_detallado(True)
                 t.lector.rebobinar()
                 self.assertTrue(self._esperar(lambda: t.lector.vuelta == 1 and not t.lector._tomado))
                 t._paso()
@@ -1730,3 +1735,96 @@ class VideoSubidoACompas(unittest.TestCase):
                 if t.lector:
                     t.lector.detener()
                 s.alertas.cerrar()
+
+
+class RendimientoEnVivo(unittest.TestCase):
+    """Para la feria: analizar en vivo con casi la misma precisión que un video en cámara lenta. La precisión depende
+    de cuántos cuadros por segundo se analizan; estas piezas suben esa cantidad sin cambiar las reglas."""
+
+    def test_perfil_rapido(self):
+        from vigia.rendimiento import aplicar_perfil
+        cfg = copy.deepcopy(CFG)
+        self.assertEqual(aplicar_perfil(cfg, "rápido"), "rapido")
+        self.assertEqual(cfg["modelos"]["tamano_imagen"], 384)
+        self.assertEqual(cfg["modelos"]["tamano_imagen_objetos"], 480)
+        self.assertEqual(cfg["procesamiento"]["rostros_cada_n_frames"], 3)
+        normal = copy.deepcopy(CFG)
+        aplicar_perfil(normal, None)
+        self.assertEqual(normal["modelos"], CFG["modelos"])            # «normal» no toca nada
+        with self.assertRaises(ValueError):
+            aplicar_perfil(copy.deepcopy(CFG), "turbo")
+
+    def test_usa_el_modelo_exportado_y_vuelve_al_pt_si_falla(self):
+        import types
+        from vigia import modelos
+        with tempfile.TemporaryDirectory() as d:
+            pt = Path(d) / "yolo11n-pose.pt"
+            pt.write_bytes(b"")
+            self.assertIsNone(modelos.ruta_acelerada(str(pt)))
+            ov = Path(d) / "yolo11n-pose_openvino_model"
+            ov.mkdir()
+            (ov / "metadata.yaml").write_text("task: pose\nimgsz:\n- 384\n- 384\n", encoding="utf-8")
+            self.assertEqual(modelos.ruta_acelerada(str(pt)), ov)
+
+            cargados = []
+
+            class YOLOFalso:
+                falla = False
+
+                def __init__(self, ruta, task=None):
+                    if YOLOFalso.falla and "openvino" in str(ruta):
+                        raise RuntimeError("openvino roto")
+                    cargados.append(str(ruta))
+
+            sys.modules["ultralytics"] = types.SimpleNamespace(YOLO=YOLOFalso)
+            try:
+                _, tam, modo = modelos.cargar_yolo(str(pt), "pose", 480, {})
+                self.assertEqual((modo, tam), ("openvino", 384))       # el tamaño exportado manda
+                _, tam, modo = modelos.cargar_yolo(str(pt), "pose", 480, {"aceleracion": "no"})
+                self.assertEqual((modo, tam), ("cpu", 480))
+                YOLOFalso.falla = True
+                _, tam, modo = modelos.cargar_yolo(str(pt), "pose", 480, {})
+                self.assertEqual((modo, tam, cargados[-1]), ("cpu", 480, str(pt)))
+            finally:
+                del sys.modules["ultralytics"]
+
+    def test_rostros_en_imagen_reducida_vuelven_a_tamano_original(self):
+        from vigia.modelos import AnalizadorRostros
+        a = AnalizadorRostros("no-existe.onnx", "no-existe.onnx")
+
+        class YuNetFalso:
+            def setInputSize(self, tam):
+                self.tam = tam
+
+            def detect(self, img):
+                f = np.zeros(15, np.float32)
+                f[:4] = [10, 20, 30, 40]                          # en la copia de 480 px
+                f[4:14] = 50
+                return 1, np.array([f])
+
+        a.det = YuNetFalso()
+        rostros = a.detectar(np.zeros((540, 960, 3), np.uint8), False, ancho_max=480)
+        self.assertEqual(a.det.tam, (480, 270))
+        self.assertTrue(np.allclose(rostros[0].caja, [20, 40, 80, 120]))   # x2: de vuelta a 960 px
+        self.assertEqual(len(a.detectar(np.zeros((540, 960, 3), np.uint8), False)), 1)
+        self.assertEqual(a.det.tam, (960, 540))                   # sin ancho_max, como antes
+
+    def test_video_en_tiempo_real_salta_lo_que_no_alcanza(self):
+        import time as _t
+        from vigia.camara import Lector
+        with tempfile.TemporaryDirectory() as d:
+            lector = Lector(VideoSubidoACompas._video(VideoSubidoACompas, d, segundos=3.0), fps_analisis=10, detallado=False)
+            try:
+                self.assertTrue(VideoSubidoACompas._esperar(None, lambda: lector.conectada))
+                _t.sleep(0.8)                                     # un análisis lento
+                _, t = lector.tomar()
+                self.assertGreater(t, 0.5)                        # el video siguió corriendo, como una cámara en vivo
+                lector.detallado = True                           # se cambia a detallado mientras corre
+                VideoSubidoACompas._esperar(None, lambda: not lector._tomado)
+                _, t1 = lector.tomar()
+                VideoSubidoACompas._esperar(None, lambda: not lector._tomado)
+                _t.sleep(0.4)
+                _, t2 = lector.tomar()
+                self.assertAlmostEqual(t2 - t1, 0.1, delta=0.02)  # y desde ahí, 0.1 s de video por cuadro
+            finally:
+                lector.detener()

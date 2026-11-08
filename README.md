@@ -95,6 +95,31 @@ python scripts/descargar_modelos.py
 python -m vigia            # o: python -m vigia --demo
 ```
 
+## En vivo con la misma precisión que en cámara lenta
+
+Un video subido en modo **Detallado** se analiza a 10 cuadros por cada segundo de video, aunque la PC tarde más
+(se ve en cámara lenta). Una cámara en vivo no puede esperar: analiza los cuadros que la PC alcanza y se salta el
+resto. La precisión en vivo depende entonces de cuántos cuadros por segundo alcanza la computadora; la tarjeta
+de cada cámara lo indica con «precisión alta» (7 o más), «media» (4 a 7) o «baja» (menos de 4). Al pasar el
+mouse por encima se ve cuánto tarda cada parte del análisis.
+
+Para acercar lo en vivo a lo detallado, paso a paso (mida después de cada uno):
+
+1. **Medir:** `python scripts\medir_velocidad.py video.mp4` dice cuántos cuadros por segundo da esta PC y qué parte
+   del análisis pesa más.
+2. **Perfil rápido:** `python -m vigia --rapido` (o `perfil: rapido` en `config.yaml`). Personas a 384 px, objetos
+   a 480 px y rostros cada 3 cuadros. De cerca detecta igual; pierde algo de alcance (objetos a más de 5-6 m).
+3. **Acelerar los modelos:** `python scripts\acelerar_modelos.py` (o `--rapido` si usará ese perfil). Los exporta a
+   OpenVINO, que en CPU suele ser 2 a 3 veces más rápido con las mismas detecciones. Se hace una vez, con internet;
+   VigIA los usa solo (la consola dice «personas en openvino»). Si cambia los tamaños de imagen, vuelva a correrlo.
+4. **Una cámara a la vez:** las cámaras se turnan los modelos; dos cámaras van a la mitad cada una.
+5. **Emociones apagadas** (`analizar_emociones: false`) si no se van a mostrar: ahorran el modelo de expresiones.
+6. **Con tarjeta gráfica NVIDIA**, VigIA la usa sola (instale PyTorch con CUDA): suele pasar de 30 cuadros por segundo.
+
+En los videos subidos, el botón **Detallado / Tiempo real** de la tarjeta cambia de modo mientras corre: en tiempo
+real el video va a su velocidad y se comporta como una cámara en vivo (sirve para mostrar qué se perdería en vivo
+con esta PC); en detallado no se salta nada. Para la feria: `python -m vigia --feria --rapido`.
+
 ## Analizar un video sin tocar el código
 
 En el panel, **+ Cámara** tiene dos pestañas:
@@ -313,7 +338,7 @@ vigia/
 
 | Problema | Qué hacer |
 |---|---|
-| Va lento (menos de 5 fps) | En `config.yaml`, baje `tamano_imagen` a 320 y `fps_objetivo` a 6 |
+| Va lento (menos de 5 fps) o dice «precisión baja» | Siga «En vivo con la misma precisión que en cámara lenta»: `scripts\medir_velocidad.py`, `--rapido` y `scripts\acelerar_modelos.py` |
 | Un video subido no da alertas | Mire la tarjeta: si dice «cámara lenta», el análisis va bien, solo más despacio; espere a que pase la escena. Analice un video a la vez y quite las demás cámaras. Para ver qué detectó cuadro por cuadro: `python scripts\diagnosticar_video.py video.mp4` |
 | «No se pudo abrir 0» | Cierre otras apps que usen la webcam (Zoom, Teams) o pruebe con la fuente `1` |
 | La cámara IP no conecta | Pruebe la URL en VLC (Medio → Abrir ubicación de red); verifique usuario, clave y que esté en la misma red |

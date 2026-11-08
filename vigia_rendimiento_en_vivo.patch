@@ -1,0 +1,954 @@
+diff --git a/README.md b/README.md
+index c628c28..0bca7fc 100644
+--- a/README.md
++++ b/README.md
+@@ -95,6 +95,31 @@ python scripts/descargar_modelos.py
+ python -m vigia            # o: python -m vigia --demo
+ ```
+ 
++## En vivo con la misma precisión que en cámara lenta
++
++Un video subido en modo **Detallado** se analiza a 10 cuadros por cada segundo de video, aunque la PC tarde más
++(se ve en cámara lenta). Una cámara en vivo no puede esperar: analiza los cuadros que la PC alcanza y se salta el
++resto. La precisión en vivo depende entonces de cuántos cuadros por segundo alcanza la computadora; la tarjeta
++de cada cámara lo indica con «precisión alta» (7 o más), «media» (4 a 7) o «baja» (menos de 4). Al pasar el
++mouse por encima se ve cuánto tarda cada parte del análisis.
++
++Para acercar lo en vivo a lo detallado, paso a paso (mida después de cada uno):
++
++1. **Medir:** `python scripts\medir_velocidad.py video.mp4` dice cuántos cuadros por segundo da esta PC y qué parte
++   del análisis pesa más.
++2. **Perfil rápido:** `python -m vigia --rapido` (o `perfil: rapido` en `config.yaml`). Personas a 384 px, objetos
++   a 480 px y rostros cada 3 cuadros. De cerca detecta igual; pierde algo de alcance (objetos a más de 5-6 m).
++3. **Acelerar los modelos:** `python scripts\acelerar_modelos.py` (o `--rapido` si usará ese perfil). Los exporta a
++   OpenVINO, que en CPU suele ser 2 a 3 veces más rápido con las mismas detecciones. Se hace una vez, con internet;
++   VigIA los usa solo (la consola dice «personas en openvino»). Si cambia los tamaños de imagen, vuelva a correrlo.
++4. **Una cámara a la vez:** las cámaras se turnan los modelos; dos cámaras van a la mitad cada una.
++5. **Emociones apagadas** (`analizar_emociones: false`) si no se van a mostrar: ahorran el modelo de expresiones.
++6. **Con tarjeta gráfica NVIDIA**, VigIA la usa sola (instale PyTorch con CUDA): suele pasar de 30 cuadros por segundo.
++
++En los videos subidos, el botón **Detallado / Tiempo real** de la tarjeta cambia de modo mientras corre: en tiempo
++real el video va a su velocidad y se comporta como una cámara en vivo (sirve para mostrar qué se perdería en vivo
++con esta PC); en detallado no se salta nada. Para la feria: `python -m vigia --feria --rapido`.
++
+ ## Analizar un video sin tocar el código
+ 
+ En el panel, **+ Cámara** tiene dos pestañas:
+@@ -313,7 +338,7 @@ vigia/
+ 
+ | Problema | Qué hacer |
+ |---|---|
+-| Va lento (menos de 5 fps) | En `config.yaml`, baje `tamano_imagen` a 320 y `fps_objetivo` a 6 |
++| Va lento (menos de 5 fps) o dice «precisión baja» | Siga «En vivo con la misma precisión que en cámara lenta»: `scripts\medir_velocidad.py`, `--rapido` y `scripts\acelerar_modelos.py` |
+ | Un video subido no da alertas | Mire la tarjeta: si dice «cámara lenta», el análisis va bien, solo más despacio; espere a que pase la escena. Analice un video a la vez y quite las demás cámaras. Para ver qué detectó cuadro por cuadro: `python scripts\diagnosticar_video.py video.mp4` |
+ | «No se pudo abrir 0» | Cierre otras apps que usen la webcam (Zoom, Teams) o pruebe con la fuente `1` |
+ | La cámara IP no conecta | Pruebe la URL en VLC (Medio → Abrir ubicación de red); verifique usuario, clave y que esté en la misma red |
+diff --git a/config.yaml b/config.yaml
+index 668c48f..7721d9a 100644
+--- a/config.yaml
++++ b/config.yaml
+@@ -21,6 +21,9 @@ modelos:
+   tamano_imagen: 480           # menor = más rápido en CPU
+   tamano_imagen_objetos: 640   # los objetos son chicos: una mochila a 4 m casi no se ve a 480 (si va lento, baje a 480)
+   confianza: 0.40
++  # auto = si existe la versión OpenVINO de un modelo (python scripts/acelerar_modelos.py) se usa esa, 2-3 veces
++  # más rápida en CPU; con tarjeta NVIDIA se usa la GPU. "no" = siempre el .pt en CPU
++  aceleracion: auto
+   objetos_cada_n_frames: 3     # el detector de objetos corre 1 de cada N frames (2 = detecta mejor, más lento)
+   # Vocabulario abierto (YOLO-World): reconoce objetos por su nombre (ropa, saco, tablet…), no solo las
+   # 80 clases de COCO. Se prepara una vez, con internet:  python scripts/preparar_vocabulario.py
+@@ -57,9 +60,15 @@ modelos:
+ 
+ procesamiento:
+   fps_objetivo: 10             # frames analizados por segundo y por cámara
++  # normal = lo de este archivo; rapido = imágenes más chicas para llegar a ~10 cuadros por segundo en vivo
++  # en una laptop sin tarjeta gráfica (también: python -m vigia --rapido). Vea vigia/rendimiento.py
++  perfil: normal
++  rostros_cada_n_frames: 2     # YuNet busca rostros 1 de cada N cuadros; en los demás se difumina con la pose
++  ancho_rostros: 480           # y los busca en una copia de este ancho (los rostros cercanos se ven igual)
+   # Videos subidos: se analizan fps_objetivo cuadros por cada segundo de video, aunque la PC sea lenta (el video
+   # se ve en cámara lenta, pero no se salta nada). Al terminar quedan en el último cuadro; ▶ los repite.
+   repetir_videos: false        # true = vuelven a empezar solos (útil en una feria, sin nadie al lado)
++  videos_detallado: true       # false = los videos subidos empiezan en «tiempo real» (como una cámara en vivo)
+   objetos_cada_n_frames_videos: 2   # en los videos subidos el detector de objetos corre 1 de cada 2 cuadros
+   ancho_max: 960               # se reduce el frame antes de analizarlo
+ 
+diff --git a/pruebas/test_reglas.py b/pruebas/test_reglas.py
+index 80b7eb6..af0d727 100644
+--- a/pruebas/test_reglas.py
++++ b/pruebas/test_reglas.py
+@@ -1721,6 +1721,11 @@ class VideoSubidoACompas(unittest.TestCase):
+                 self.assertTrue(np.allclose(t.detector.vistos, [0.1, 0.2, 0.3, 0.4], atol=0.02), t.detector.vistos)
+                 self.assertEqual(t.detector.cada_n, 2)
+                 self.assertIsNotNone(t.estado["velocidad"])
++                self.assertEqual(t.estado["precision"], "alta")          # detallado: 10 cuadros por segundo de video
++                self.assertIn("rostros", t.estado["etapas"])
++                self.assertTrue(t.modo_detallado(False))
++                self.assertFalse(t.lector.detallado)
++                t.modo_detallado(True)
+                 t.lector.rebobinar()
+                 self.assertTrue(self._esperar(lambda: t.lector.vuelta == 1 and not t.lector._tomado))
+                 t._paso()
+@@ -1730,3 +1735,96 @@ class VideoSubidoACompas(unittest.TestCase):
+                 if t.lector:
+                     t.lector.detener()
+                 s.alertas.cerrar()
++
++
++class RendimientoEnVivo(unittest.TestCase):
++    """Para la feria: analizar en vivo con casi la misma precisión que un video en cámara lenta. La precisión depende
++    de cuántos cuadros por segundo se analizan; estas piezas suben esa cantidad sin cambiar las reglas."""
++
++    def test_perfil_rapido(self):
++        from vigia.rendimiento import aplicar_perfil
++        cfg = copy.deepcopy(CFG)
++        self.assertEqual(aplicar_perfil(cfg, "rápido"), "rapido")
++        self.assertEqual(cfg["modelos"]["tamano_imagen"], 384)
++        self.assertEqual(cfg["modelos"]["tamano_imagen_objetos"], 480)
++        self.assertEqual(cfg["procesamiento"]["rostros_cada_n_frames"], 3)
++        normal = copy.deepcopy(CFG)
++        aplicar_perfil(normal, None)
++        self.assertEqual(normal["modelos"], CFG["modelos"])            # «normal» no toca nada
++        with self.assertRaises(ValueError):
++            aplicar_perfil(copy.deepcopy(CFG), "turbo")
++
++    def test_usa_el_modelo_exportado_y_vuelve_al_pt_si_falla(self):
++        import types
++        from vigia import modelos
++        with tempfile.TemporaryDirectory() as d:
++            pt = Path(d) / "yolo11n-pose.pt"
++            pt.write_bytes(b"")
++            self.assertIsNone(modelos.ruta_acelerada(str(pt)))
++            ov = Path(d) / "yolo11n-pose_openvino_model"
++            ov.mkdir()
++            (ov / "metadata.yaml").write_text("task: pose\nimgsz:\n- 384\n- 384\n", encoding="utf-8")
++            self.assertEqual(modelos.ruta_acelerada(str(pt)), ov)
++
++            cargados = []
++
++            class YOLOFalso:
++                falla = False
++
++                def __init__(self, ruta, task=None):
++                    if YOLOFalso.falla and "openvino" in str(ruta):
++                        raise RuntimeError("openvino roto")
++                    cargados.append(str(ruta))
++
++            sys.modules["ultralytics"] = types.SimpleNamespace(YOLO=YOLOFalso)
++            try:
++                _, tam, modo = modelos.cargar_yolo(str(pt), "pose", 480, {})
++                self.assertEqual((modo, tam), ("openvino", 384))       # el tamaño exportado manda
++                _, tam, modo = modelos.cargar_yolo(str(pt), "pose", 480, {"aceleracion": "no"})
++                self.assertEqual((modo, tam), ("cpu", 480))
++                YOLOFalso.falla = True
++                _, tam, modo = modelos.cargar_yolo(str(pt), "pose", 480, {})
++                self.assertEqual((modo, tam, cargados[-1]), ("cpu", 480, str(pt)))
++            finally:
++                del sys.modules["ultralytics"]
++
++    def test_rostros_en_imagen_reducida_vuelven_a_tamano_original(self):
++        from vigia.modelos import AnalizadorRostros
++        a = AnalizadorRostros("no-existe.onnx", "no-existe.onnx")
++
++        class YuNetFalso:
++            def setInputSize(self, tam):
++                self.tam = tam
++
++            def detect(self, img):
++                f = np.zeros(15, np.float32)
++                f[:4] = [10, 20, 30, 40]                          # en la copia de 480 px
++                f[4:14] = 50
++                return 1, np.array([f])
++
++        a.det = YuNetFalso()
++        rostros = a.detectar(np.zeros((540, 960, 3), np.uint8), False, ancho_max=480)
++        self.assertEqual(a.det.tam, (480, 270))
++        self.assertTrue(np.allclose(rostros[0].caja, [20, 40, 80, 120]))   # x2: de vuelta a 960 px
++        self.assertEqual(len(a.detectar(np.zeros((540, 960, 3), np.uint8), False)), 1)
++        self.assertEqual(a.det.tam, (960, 540))                   # sin ancho_max, como antes
++
++    def test_video_en_tiempo_real_salta_lo_que_no_alcanza(self):
++        import time as _t
++        from vigia.camara import Lector
++        with tempfile.TemporaryDirectory() as d:
++            lector = Lector(VideoSubidoACompas._video(VideoSubidoACompas, d, segundos=3.0), fps_analisis=10, detallado=False)
++            try:
++                self.assertTrue(VideoSubidoACompas._esperar(None, lambda: lector.conectada))
++                _t.sleep(0.8)                                     # un análisis lento
++                _, t = lector.tomar()
++                self.assertGreater(t, 0.5)                        # el video siguió corriendo, como una cámara en vivo
++                lector.detallado = True                           # se cambia a detallado mientras corre
++                VideoSubidoACompas._esperar(None, lambda: not lector._tomado)
++                _, t1 = lector.tomar()
++                VideoSubidoACompas._esperar(None, lambda: not lector._tomado)
++                _t.sleep(0.4)
++                _, t2 = lector.tomar()
++                self.assertAlmostEqual(t2 - t1, 0.1, delta=0.02)  # y desde ahí, 0.1 s de video por cuadro
++            finally:
++                lector.detener()
+diff --git a/scripts/acelerar_modelos.py b/scripts/acelerar_modelos.py
+new file mode 100644
+index 0000000..0b72c4b
+--- /dev/null
++++ b/scripts/acelerar_modelos.py
+@@ -0,0 +1,70 @@
++"""Exporta los modelos YOLO de VigIA a OpenVINO para que el análisis en vivo corra más rápido en CPU.
++
++En una laptop sin tarjeta gráfica, PyTorch es la forma más lenta de correr YOLO. OpenVINO es el motor de Intel
++para CPU (funciona también en procesadores AMD) y suele ser 2 a 3 veces más rápido con el mismo modelo y
++las mismas detecciones: no cambia la precisión, solo el tiempo que tarda cada cuadro.
++
++Se corre una vez, con internet (la primera vez instala el paquete openvino):
++
++  python scripts\\acelerar_modelos.py              exporta con los tamaños de config.yaml
++  python scripts\\acelerar_modelos.py --rapido     exporta con los tamaños del perfil rápido (feria)
++
++Crea, junto a cada .pt, una carpeta `<modelo>_openvino_model/`. VigIA la usa sola al arrancar (lo dice en la
++consola: «personas en openvino»). Para volver a PyTorch: `aceleracion: "no"` en config.yaml, o borre las carpetas.
++Un modelo exportado solo acepta el tamaño de imagen con el que se exportó: si cambia `tamano_imagen` o
++`tamano_imagen_objetos` en config.yaml, vuelva a correr este script.
++"""
++from __future__ import annotations
++
++import argparse
++import shutil
++import sys
++import time
++from pathlib import Path
++
++import yaml
++
++RAIZ = Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(RAIZ))
++
++from vigia.modelos import modelo_abierto, ruta_acelerada, ruta_modelo  # noqa: E402
++from vigia.rendimiento import aplicar_perfil  # noqa: E402
++
++
++def exportar(ruta: str, tarea: str, imgsz: int) -> bool:
++    from ultralytics import YOLO
++    print(f"\n- {Path(ruta).name} ({tarea}, {imgsz} px)")
++    vieja = ruta_acelerada(ruta)
++    if vieja is not None:
++        shutil.rmtree(vieja)                    # se rehace: pudo exportarse con otro tamaño
++    try:
++        t0 = time.time()
++        destino = YOLO(ruta).export(format="openvino", imgsz=imgsz, half=False, dynamic=False)
++        print(f"  listo en {time.time() - t0:.0f} s -> {destino}")
++        return True
++    except Exception as e:  # noqa: BLE001
++        print(f"  NO se pudo exportar ({e}). VigIA seguirá usando el .pt para este modelo.")
++        return False
++
++
++def main():
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("--config", default=str(RAIZ / "config.yaml"))
++    ap.add_argument("--rapido", action="store_true", help="usar los tamaños del perfil rápido")
++    a = ap.parse_args()
++    cfg = yaml.safe_load(Path(a.config).read_text(encoding="utf-8"))
++    aplicar_perfil(cfg, "rapido" if a.rapido else cfg.get("procesamiento", {}).get("perfil", "normal"))
++    m = cfg["modelos"]
++    tam_obj = m.get("tamano_imagen_objetos", m["tamano_imagen"])
++    ok = exportar(ruta_modelo(m["pose"]), "pose", m["tamano_imagen"])
++    abierto = modelo_abierto(m)
++    if abierto:
++        ok &= exportar(abierto, "detect", tam_obj)
++    ok &= exportar(ruta_modelo(m["objetos"]), "detect", tam_obj)   # el de COCO: respaldo si se apaga el vocabulario
++    print("\nListo. Arranque VigIA como siempre; en la consola debe decir «personas en openvino»."
++          if ok else "\nAlgún modelo no se exportó; VigIA usa el .pt para ese y la versión rápida para los demás.")
++    print("Para comparar la velocidad: python scripts\\medir_velocidad.py <video.mp4>")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/medir_velocidad.py b/scripts/medir_velocidad.py
+new file mode 100644
+index 0000000..254c0e8
+--- /dev/null
++++ b/scripts/medir_velocidad.py
+@@ -0,0 +1,133 @@
++"""Mide cuántos cuadros por segundo analiza esta computadora y en qué se va el tiempo de cada cuadro.
++
++La precisión en vivo depende de esa cifra: un tirón de mochila o un golpe duran 1 a 2 s, y las reglas necesitan
++verlos en varios cuadros. Con 7 o más cuadros por segundo, el análisis en vivo se acerca al de un video en
++cámara lenta («precisión alta» en la tarjeta de la cámara).
++
++Uso (con un video de prueba o la webcam):
++  python scripts\\medir_velocidad.py VID_20261105_155429.mp4
++  python scripts\\medir_velocidad.py VID_20261105_155429.mp4 --rapido        el perfil rápido de la feria
++  python scripts\\medir_velocidad.py 0 --cuadros 100                          la webcam
++
++Pruebe en este orden y vuelva a medir después de cada paso, para ver cuánto ganó:
++  1. tal como está;   2. --rapido;   3. después de  python scripts\\acelerar_modelos.py  (y --rapido si lo usará).
++"""
++from __future__ import annotations
++
++import argparse
++import sys
++import time
++from pathlib import Path
++
++import cv2
++import numpy as np
++import yaml
++
++RAIZ = Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(RAIZ))
++
++from vigia.historial import Historial  # noqa: E402
++from vigia.objetos import FiltroObjetos  # noqa: E402
++from vigia.reglas import Reglas  # noqa: E402
++from vigia.rendimiento import aplicar_perfil  # noqa: E402
++
++
++def main():
++    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    ap.add_argument("fuente", help="video o número de webcam")
++    ap.add_argument("--config", default=str(RAIZ / "config.yaml"))
++    ap.add_argument("--rapido", action="store_true", help="medir con el perfil rápido")
++    ap.add_argument("--cuadros", type=int, default=60)
++    ap.add_argument("--camaras", type=int, default=1, help="cuántas cámaras tendrá a la vez (se turnan los modelos)")
++    a = ap.parse_args()
++
++    cfg = yaml.safe_load(Path(a.config).read_text(encoding="utf-8"))
++    perfil = aplicar_perfil(cfg, "rapido" if a.rapido else cfg.get("procesamiento", {}).get("perfil"))
++    from vigia.modelos import AnalizadorRostros, DetectorYOLO, asignar_rostros
++    m, proc, priv = cfg["modelos"], cfg["procesamiento"], cfg["privacidad"]
++    det = DetectorYOLO(m)
++    rostros = AnalizadorRostros(m["rostros"], m["emociones"])
++    filtro, hist, reglas = FiltroObjetos(abierto=det.abierto), Historial(), Reglas(cfg["reglas"])
++    usar_rostros = rostros.disponible and (priv["difuminar_rostros"] or priv["analizar_emociones"])
++
++    cap = cv2.VideoCapture(int(a.fuente) if a.fuente.isdigit() else a.fuente)
++    salto = 1
++    if not a.fuente.isdigit():
++        salto = max(1, round((cap.get(cv2.CAP_PROP_FPS) or 30) / proc["fps_objetivo"]))
++    tiempos = {"personas": [], "objetos": [], "rostros": [], "reglas": []}
++    total, n, i = [], 0, 0
++    while n < a.cuadros + 3:
++        ok, frame = cap.read()
++        if not ok:
++            if a.fuente.isdigit():
++                break
++            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
++            continue
++        i += 1
++        if i % salto:
++            continue
++        if frame.shape[1] > proc["ancho_max"]:
++            e = proc["ancho_max"] / frame.shape[1]
++            frame = cv2.resize(frame, (proc["ancho_max"], int(frame.shape[0] * e)))
++        t = n / proc["fps_objetivo"]
++        t0 = time.perf_counter()
++        corre_objetos = det.n % max(1, m["objetos_cada_n_frames"]) == 0
++        obs = det.procesar(frame, t)
++        t1 = time.perf_counter()
++        if usar_rostros and n % max(1, int(proc.get("rostros_cada_n_frames", 1))) == 0:
++            obs.rostros = rostros.detectar(frame, priv["analizar_emociones"], int(proc.get("ancho_rostros", 0)))
++            asignar_rostros(obs.rostros, obs.personas)
++        t2 = time.perf_counter()
++        obs.objetos = filtro.filtrar(obs.objetos, t, cfg["reglas"]["objetos"], obs.personas)
++        hist.actualizar(obs)
++        reglas.evaluar(obs, hist, frame.shape[1], frame.shape[0], [])
++        t3 = time.perf_counter()
++        n += 1
++        if n <= 3:                                   # los primeros cuadros cargan cosas: no cuentan
++            continue
++        tiempos["personas"].append(det.ms["personas"])
++        if corre_objetos:
++            tiempos["objetos"].append(det.ms["objetos"])
++        tiempos["rostros"].append(1000 * (t2 - t1))
++        tiempos["reglas"].append(1000 * (t3 - t2))
++        total.append(1000 * (t3 - t0))
++    if not total:
++        print("No se pudo leer la fuente.")
++        return
++
++    ms = float(np.mean(total))
++    fps = 1000 / ms / a.camaras
++    cada_obj = max(1, m["objetos_cada_n_frames"])
++    print(f"\n=== {len(total)} cuadros · perfil {perfil} · personas {m['tamano_imagen']} px en "
++          f"{det.aceleracion['personas']}, objetos {m.get('tamano_imagen_objetos')} px en {det.aceleracion['objetos']} ===")
++    filas = [("Personas y esqueleto (YOLO pose)", np.mean(tiempos["personas"]), "cada cuadro"),
++             ("Objetos (mochila, ropa…)", np.mean(tiempos["objetos"] or [0]), f"1 de cada {cada_obj} cuadros"),
++             ("Rostros y emociones", np.mean(tiempos["rostros"]), "promedio por cuadro"),
++             ("Reglas", np.mean(tiempos["reglas"]), "cada cuadro")]
++    for nombre, v, nota in filas:
++        print(f"  {nombre:34s} {v:7.1f} ms   ({nota})")
++    print(f"  {'Total por cuadro':34s} {ms:7.1f} ms")
++    nivel = "ALTA" if fps >= 7 else "MEDIA" if fps >= 4 else "BAJA"
++    print(f"\nCon {a.camaras} cámara(s): unos {fps:.1f} cuadros por segundo por cámara -> precisión en vivo {nivel}")
++    print(f"(el panel pide {proc['fps_objetivo']}; por encima de eso no se gana nada)")
++
++    consejos = []
++    if det.aceleracion["personas"] == "cpu":
++        consejos.append("Exporte los modelos a OpenVINO (2-3 veces más rápido en CPU): "
++                        "python scripts\\acelerar_modelos.py" + (" --rapido" if perfil == "rapido" else ""))
++    if perfil != "rapido":
++        consejos.append("Pruebe el perfil rápido: python scripts\\medir_velocidad.py ... --rapido "
++                        "(y en la feria: python -m vigia --rapido)")
++    if np.mean(tiempos["rostros"]) > 0.25 * ms:
++        consejos.append("Los rostros pesan mucho: apague las emociones (analizar_emociones: false) o suba "
++                        "rostros_cada_n_frames")
++    if a.camaras > 1:
++        consejos.append("Cada cámara extra divide la velocidad: en la demostración deje solo la que se está usando")
++    if fps < 7:
++        print("\nPara subirla, en este orden:")
++        for k, c in enumerate(consejos, 1):
++            print(f"  {k}. {c}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/vigia/__main__.py b/vigia/__main__.py
+index e57b51d..bd476f9 100644
+--- a/vigia/__main__.py
++++ b/vigia/__main__.py
+@@ -19,6 +19,7 @@ HILOS = max(1, (os.cpu_count() or 2) - 1)
+ for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+     os.environ.setdefault(_var, str(HILOS))
+ 
++from .rendimiento import aplicar_perfil  # noqa: E402
+ from .servidor import RAIZ, crear_app, ip_local  # noqa: E402
+ 
+ 
+@@ -30,9 +31,14 @@ def main():
+     ap.add_argument("--sin-navegador", action="store_true")
+     ap.add_argument("--feria", action="store_true",
+                     help="modo feria: retos con tiempos cortos y encuesta abierta a los celulares de la red local")
++    ap.add_argument("--rapido", action="store_true",
++                    help="perfil rápido: imágenes más chicas para analizar más cuadros por segundo en vivo (feria)")
+     a = ap.parse_args()
+     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
+     cfg = yaml.safe_load(Path(a.config).read_text(encoding="utf-8"))
++    perfil = aplicar_perfil(cfg, "rapido" if a.rapido else cfg.get("procesamiento", {}).get("perfil"))
++    if perfil != "normal":
++        print(f"Perfil de rendimiento: {perfil}")
+     datos = Path(a.datos)
+     if a.demo:
+         datos = datos / "demo"
+diff --git a/vigia/camara.py b/vigia/camara.py
+index 534e7e4..27c66dc 100644
+--- a/vigia/camara.py
++++ b/vigia/camara.py
+@@ -30,12 +30,13 @@ class Lector:
+     (antes se reproducía a su velocidad real y, a 1-2 cuadros analizados por segundo, un tirón de mochila de dos
+     segundos quedaba entre dos cuadros y la mochila nunca llegaba a confirmarse)."""
+ 
+-    def __init__(self, fuente, fps_analisis: float = 10, repetir: bool = False):
++    def __init__(self, fuente, fps_analisis: float = 10, repetir: bool = False, detallado: bool = True):
+         self.fuente = int(fuente) if str(fuente).isdigit() else str(fuente)
+         self.es_archivo = isinstance(self.fuente, str) and not self.fuente.lower().startswith(("rtsp", "http"))
+         self.es_enlace = isinstance(self.fuente, str) and self.fuente.lower().startswith(("http://", "https://"))
+         self.fps_analisis = max(1.0, float(fps_analisis))
+         self.repetir = repetir
++        self.detallado = detallado        # video: True = cuadro a cuadro (cámara lenta), False = a su velocidad real
+         self.frame: Optional[np.ndarray] = None
+         self.conectada = False
+         self.finito = self.es_archivo     # tiene duración (archivo o enlace a un .mp4): se puede pausar
+@@ -105,24 +106,44 @@ class Lector:
+             self.conectada = True
+ 
+     def _leer_video(self, cap, fps_archivo: float):
++        """Dos modos, que se pueden cambiar mientras corre (botón de la tarjeta):
++        - detallado: entrega 1 de cada `salto` cuadros y espera a que el análisis lo tome (cámara lenta si hace falta);
++        - tiempo real: el video corre a su velocidad y el análisis toma el cuadro más reciente, como una cámara en vivo."""
+         salto = max(1, round(fps_archivo / self.fps_analisis))   # p. ej. un video de 60 fps: 1 de cada 6 cuadros
+         self.paso_video = salto / fps_archivo
+         leidos = 0
++        ref = None                                  # (instante, cuadro) desde el que corre el tiempo real
+         while not self._parar:
+             if self._rebobinar:
+                 self._rebobinar = False
+                 self._desfase = self.t_video + 1.0  # el reloj del análisis sigue avanzando: nunca vuelve atrás
+                 self.vuelta += 1
+                 self.terminado = False
++                ref = None
+                 if not self.es_archivo:
+                     return                          # un enlace se vuelve a abrir desde el principio
+                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                 leidos = 0
+-            if self.pausado or self.terminado or not self._tomado:
+-                time.sleep(0.005)
++            if self.pausado or self.terminado:
++                ref = None
++                time.sleep(0.01)
+                 continue
++            if self.detallado:
++                ref = None
++                if not self._tomado:
++                    time.sleep(0.005)
++                    continue
++                avanzar = salto
++            else:
++                if ref is None:
++                    ref = (time.monotonic(), leidos)
++                objetivo = ref[1] + int((time.monotonic() - ref[0]) * fps_archivo)
++                if objetivo <= leidos:
++                    time.sleep(min(0.01, 0.5 / fps_archivo))
++                    continue
++                avanzar = objetivo - leidos         # los cuadros que el análisis no alcanza se saltan
+             ok = True
+-            for _ in range(salto - 1):              # grab() salta cuadros sin convertirlos: más liviano que read()
++            for _ in range(avanzar - 1):            # grab() salta cuadros sin convertirlos: más liviano que read()
+                 ok = cap.grab()
+                 if not ok:
+                     break
+@@ -190,6 +211,9 @@ class Trabajador:
+         self._pausa_desde: Optional[float] = None   # instante en que se pausó (solo videos subidos y demo)
+         self._pausa_total = 0.0                     # segundos en pausa acumulados: el reloj del análisis no avanza
+         self._vuelta = 0                            # vuelta del video que se está analizando
++        self._n_cuadro = 0
++        self._ms: dict[str, float] = {}             # milisegundos de cada etapa en el último cuadro
++        self._inicio_paso = time.perf_counter()
+         self.lector = None
+         self.sim = None
+         self.detector = None
+@@ -205,7 +229,8 @@ class Trabajador:
+             else:
+                 from .modelos import AnalizadorRostros, DetectorYOLO
+                 proc = self.cfg["procesamiento"]
+-                self.lector = Lector(self.fuente, proc["fps_objetivo"], bool(proc.get("repetir_videos", False)))
++                self.lector = Lector(self.fuente, proc["fps_objetivo"], bool(proc.get("repetir_videos", False)),
++                                     bool(proc.get("videos_detallado", True)))
+                 self.detector = DetectorYOLO(self.cfg["modelos"])
+                 self.rostros = AnalizadorRostros(self.cfg["modelos"]["rostros"], self.cfg["modelos"]["emociones"])
+         except Exception as e:  # p. ej. falta instalar ultralytics
+@@ -255,6 +280,16 @@ class Trabajador:
+             self.estado["terminado"] = False
+         return True
+ 
++    def modo_detallado(self, detallado: bool) -> bool:
++        """Video subido: True = analiza cada segundo completo (cámara lenta si la PC no alcanza); False = a velocidad
++        real, saltando lo que no alcanza a ver (así se comporta una cámara en vivo)."""
++        if self.lector is None or not self.lector.finito:
++            return False
++        self.lector.detallado = detallado
++        self.estado["detallado"] = detallado
++        self._tiempos.clear()
++        return True
++
+     def _reloj(self) -> float:
+         """Hora para el análisis: la del sistema menos el tiempo que el video estuvo en pausa."""
+         ahora = self._pausa_desde if self._pausa_desde is not None else time.time()   # en pausa, quieto
+@@ -290,6 +325,7 @@ class Trabajador:
+                 for r in obs.rostros:
+                     r.probs = None
+         else:
++            inicio = time.perf_counter()
+             self.estado["conectada"] = self.lector.conectada
+             video = self.lector.finito
+             if video:
+@@ -301,7 +337,8 @@ class Trabajador:
+                 if tomado is None:
+                     return                               # el lector todavía no tiene el cuadro siguiente
+                 frame, t = tomado                        # reloj del análisis = segundo del video
+-                self.detector.cada_n = int(self.cfg["procesamiento"].get("objetos_cada_n_frames_videos", 2))
++                self.detector.cada_n = (int(self.cfg["procesamiento"].get("objetos_cada_n_frames_videos", 2))
++                                        if self.lector.detallado else None)
+             else:
+                 frame = self.lector.ultimo()
+                 if frame is None:
+@@ -312,14 +349,22 @@ class Trabajador:
+                 esc = ancho_max / frame.shape[1]
+                 frame = cv2.resize(frame, (ancho_max, int(frame.shape[0] * esc)))
+             obs = self.detector.procesar(frame, t)
+-            if self.rostros.disponible and (priv["difuminar_rostros"] or priv["analizar_emociones"]):
++            t_rostros = time.perf_counter()
++            self._n_cuadro += 1
++            cada_rostros = max(1, int(self.cfg["procesamiento"].get("rostros_cada_n_frames", 1)))
++            if (self.rostros.disponible and (priv["difuminar_rostros"] or priv["analizar_emociones"])
++                    and self._n_cuadro % cada_rostros == 0):
++                # en los otros cuadros no hay rostros: se difumina la cabeza estimada con la pose (cajas_cabeza)
+                 from .modelos import asignar_rostros
+-                obs.rostros = self.rostros.detectar(frame, priv["analizar_emociones"])
++                obs.rostros = self.rostros.detectar(frame, priv["analizar_emociones"],
++                                                    int(self.cfg["procesamiento"].get("ancho_rostros", 0)))
+                 asignar_rostros(obs.rostros, obs.personas)
++            self._ms = {**getattr(self.detector, "ms", {}), "rostros": 1000 * (time.perf_counter() - t_rostros)}
++            self._inicio_paso = inicio
+ 
+         h, w = frame.shape[:2]
+         if not self.demo:            # los objetos del modo demo ya vienen limpios
+-            if not self.lector.finito and len(self._tiempos) > 5:
++            if not (self.lector.finito and self.lector.detallado) and len(self._tiempos) > 5:
+                 # cámara en vivo en una PC lenta: si el detector de objetos pasa pocas veces por segundo, la ventana
+                 # para juntar 3 detecciones se alarga (con 4 s fijos, a 1 cuadro por segundo nada se confirmaba)
+                 fps_med = (len(self._tiempos) - 1) / max(1e-3, self._tiempos[-1] - self._tiempos[0])
+@@ -352,12 +397,14 @@ class Trabajador:
+         self._tiempos.append(ahora)
+         fps = (len(self._tiempos) - 1) / (self._tiempos[-1] - self._tiempos[0]) if len(self._tiempos) > 1 else 0.0
+         velocidad = None
+-        if self.lector is not None and self.lector.finito:
++        if self.lector is not None and self.lector.finito and self.lector.detallado:
+             velocidad = round(fps * self.lector.paso_video, 2)      # segundos de video analizados por segundo real
+             enc = (f"{self.nombre}  |  video {t:5.1f} s  |  {fps:.1f} fps"
+                    + (f" (camara lenta x{velocidad:.2f})" if velocidad < 0.95 else "") + f"  |  {len(obs.personas)} personas")
+         else:
+             enc = f"{self.nombre}  |  {time.strftime('%H:%M:%S')}  |  {fps:.1f} fps  |  {len(obs.personas)} personas"
++            if self.lector is not None and self.lector.finito:
++                enc = f"{self.nombre}  |  video {t:5.1f} s (tiempo real)  |  {fps:.1f} fps  |  {len(obs.personas)} personas"
+         if self.demo:
+             enc += "  |  MODO DEMO (escena simulada)"
+         if esqueleto:
+@@ -370,6 +417,18 @@ class Trabajador:
+         self.estado.update(fps=round(fps, 1), personas=len(obs.personas),
+                            emociones=dict(Counter(emociones.values())), error=None, ancho=w, alto=h,
+                            pausable=self.pausable, pausado=self._pausa_desde is not None, velocidad=velocidad)
++        if not self.demo:
++            detallado = bool(self.lector.finito and self.lector.detallado)
++            # precisión esperada según los cuadros que se analizan por cada segundo de lo que pasa delante de la
++            # cámara: un tirón o un golpe dura 1-2 s y las reglas necesitan verlo en varios cuadros
++            por_segundo = self.cfg["procesamiento"]["fps_objetivo"] if detallado else fps
++            total = 1000 * (time.perf_counter() - self._inicio_paso)
++            etapas = {k: round(v) for k, v in self._ms.items()}
++            etapas["reglas y dibujo"] = max(0, round(total - sum(self._ms.values())))
++            self.estado.update(
++                detallado=detallado if self.lector.finito else None,
++                precision="alta" if por_segundo >= 7 else "media" if por_segundo >= 4 else "baja",
++                etapas=etapas, aceleracion=getattr(self.detector, "aceleracion", None))
+ 
+     def actualizar_cfg(self, cfg: dict):
+         self.cfg = cfg
+diff --git a/vigia/modelos.py b/vigia/modelos.py
+index 7628e9b..5b84ebe 100644
+--- a/vigia/modelos.py
++++ b/vigia/modelos.py
+@@ -1,4 +1,4 @@
+-"""Modelos de visión. Todo corre en CPU.
++"""Modelos de visión. Corren en CPU; si hay una tarjeta gráfica NVIDIA (CUDA) la usan solos.
+ 
+ - YOLO11n-pose: detecta personas, estima 17 puntos del cuerpo y las sigue entre frames (ByteTrack).
+ - YOLO11n: detecta mochilas, bolsos y maletas, también con seguimiento.
+@@ -9,6 +9,7 @@ from __future__ import annotations
+ import logging
+ import os
+ import threading
++import time
+ from pathlib import Path
+ from typing import Optional
+ 
+@@ -30,6 +31,64 @@ def ruta_modelo(ruta: str) -> str:
+         return str(p)
+     return p.name
+ 
++def ruta_acelerada(ruta: str) -> Optional[Path]:
++    """Carpeta del modelo exportado a OpenVINO (scripts/acelerar_modelos.py), si existe: `yolo11n-pose.pt` ->
++    `yolo11n-pose_openvino_model/`. En CPU Intel o AMD suele correr 2 a 3 veces más rápido que el .pt."""
++    p = Path(ruta)
++    candidatos = [p.with_name(p.stem + "_openvino_model")]
++    if not p.is_absolute() and len(p.parts) == 1:      # solo el nombre (ultralytics lo bajó): se busca en models/
++        candidatos.append(RAIZ / "models" / (p.stem + "_openvino_model"))
++    for c in candidatos:
++        if (c / "metadata.yaml").exists():
++            return c
++    return None
++
++
++def _imgsz_exportado(carpeta: Path) -> Optional[int]:
++    """Tamaño de imagen con el que se exportó (un modelo exportado solo acepta ese tamaño)."""
++    try:
++        import yaml
++        datos = yaml.safe_load((carpeta / "metadata.yaml").read_text(encoding="utf-8")) or {}
++        tam = datos.get("imgsz")
++        return int(max(tam)) if isinstance(tam, (list, tuple)) else int(tam) if tam else None
++    except Exception:  # noqa: BLE001 - un metadata raro: se usa el .pt
++        return None
++
++
++def dispositivo() -> str:
++    """'0' (la primera tarjeta NVIDIA) si PyTorch la ve; si no, 'cpu'."""
++    try:
++        import torch
++        return "0" if torch.cuda.is_available() else "cpu"
++    except Exception:  # noqa: BLE001
++        return "cpu"
++
++
++def cargar_yolo(ruta: str, tarea: str, imgsz: int, cfg: dict):
++    """Carga un modelo YOLO de la forma más rápida disponible y devuelve (modelo, imgsz, cómo corre).
++
++    1. Con tarjeta NVIDIA: el .pt en la GPU (en media precisión).
++    2. Sin ella, si se exportó a OpenVINO (python scripts/acelerar_modelos.py): la versión exportada.
++    3. Si no, el .pt en la CPU, como siempre.
++    Si la versión exportada falla al cargar, se vuelve al .pt: acelerar nunca debe dejar a VigIA sin modelo."""
++    from ultralytics import YOLO
++    modo = str(cfg.get("aceleracion", "auto")).lower()      # auto | openvino | no
++    disp = dispositivo()
++    if modo != "no" and disp == "cpu":
++        carpeta = ruta_acelerada(ruta)
++        if carpeta is not None:
++            tam = _imgsz_exportado(carpeta) or imgsz
++            if tam != imgsz:
++                log.warning("%s se exportó a %d px y config.yaml pide %d px: se usa %d. Para cambiarlo, vuelva a "
++                            "correr scripts/acelerar_modelos.py.", carpeta.name, tam, imgsz, tam)
++            try:
++                return YOLO(str(carpeta), task=tarea), tam, "openvino"
++            except Exception:  # noqa: BLE001
++                log.exception("No se pudo cargar %s; se usa el modelo normal (.pt)", carpeta)
++    modelo = YOLO(ruta)
++    return modelo, imgsz, ("gpu" if disp != "cpu" else "cpu")
++
++
+ # Las cámaras se turnan para usar los modelos: correr varias inferencias a la vez en CPU no es más rápido,
+ # solo reparte los núcleos entre todas y deja sin CPU al servidor web.
+ _INFERENCIA = threading.Lock()
+@@ -86,22 +145,28 @@ class DetectorYOLO:
+     """Un detector por cámara: el seguidor de YOLO guarda estado propio por instancia."""
+ 
+     def __init__(self, cfg: dict):
+-        from ultralytics import YOLO  # se importa aquí para que el modo demo no lo necesite
+         self.cfg = cfg
+         _fijar_hilos()
+-        self.pose = YOLO(ruta_modelo(cfg["pose"]))
++        self.disp = dispositivo()
++        self.media = self.disp != "cpu"          # media precisión en GPU: casi el doble de rápido
++        self.pose, self.imgsz_pose, modo_pose = cargar_yolo(ruta_modelo(cfg["pose"]), "pose", cfg["tamano_imagen"], cfg)
+         abierto = modelo_abierto(cfg)
++        tam_obj = cfg.get("tamano_imagen_objetos", cfg["tamano_imagen"])
+         if abierto:
+-            self.obj = YOLO(abierto)
++            self.obj, self.imgsz_obj, modo_obj = cargar_yolo(abierto, "detect", tam_obj, cfg)
+             vocab = vocabulario(cfg)
+             self._mapa = {int(i): vocab.get(n, n) for i, n in self.obj.names.items()}
+             self._clases, self._conf = None, float(cfg.get("confianza_objetos_abierto", 0.15))
+             log.info("Detector de objetos de vocabulario abierto: %s", ", ".join(sorted(set(self._mapa.values()))))
+         else:
+-            self.obj = YOLO(ruta_modelo(cfg["objetos"]))
++            self.obj, self.imgsz_obj, modo_obj = cargar_yolo(ruta_modelo(cfg["objetos"]), "detect", tam_obj, cfg)
+             # umbral bajo a propósito: decide el filtro de objetos (confianza media y varias detecciones seguidas)
+             self._mapa, self._clases, self._conf = CLASES_OBJETO, list(CLASES_OBJETO), 0.20
+         self.abierto = abierto is not None
++        self.aceleracion = {"personas": modo_pose, "objetos": modo_obj}
++        log.info("Modelos: personas en %s (%d px), objetos en %s (%d px)", modo_pose, self.imgsz_pose, modo_obj,
++                 self.imgsz_obj)
++        self.ms = {"personas": 0.0, "objetos": 0.0}   # milisegundos de la última pasada de cada modelo
+         self.n = 0
+         self.cada_n: int | None = None      # si se fija, reemplaza objetos_cada_n_frames (videos subidos: 2)
+         self._ultimos_objetos: list[Objeto] = []
+@@ -120,9 +185,11 @@ class DetectorYOLO:
+     def procesar(self, frame: np.ndarray, t: float) -> Observacion:
+         c = self.cfg
+         obs = Observacion(t=t)
++        t0 = time.perf_counter()
+         with _INFERENCIA:
+-            r = self.pose.track(frame, persist=True, tracker="bytetrack.yaml", imgsz=c["tamano_imagen"],
+-                                conf=c["confianza"], classes=[0], verbose=False)[0]
++            r = self.pose.track(frame, persist=True, tracker="bytetrack.yaml", imgsz=self.imgsz_pose,
++                                conf=c["confianza"], classes=[0], verbose=False, device=self.disp, half=self.media)[0]
++        self.ms["personas"] = 1000 * (time.perf_counter() - t0)
+         if r.boxes is not None and r.boxes.id is not None:
+             cajas = r.boxes.xyxy.cpu().numpy()
+             ids = r.boxes.id.int().cpu().tolist()
+@@ -137,10 +204,12 @@ class DetectorYOLO:
+         if self.n % max(1, self.cada_n or c["objetos_cada_n_frames"]) == 0:
+             # los objetos son más chicos que las personas: se buscan en una imagen más grande, con un seguidor
+             # que acepta detecciones de baja confianza (una mochila puesta o una prenda en la mano)
++            t0 = time.perf_counter()
+             with _INFERENCIA:
+-                ro = self.obj.track(frame, persist=True, tracker=SEGUIDOR_OBJETOS,
+-                                    imgsz=c.get("tamano_imagen_objetos", c["tamano_imagen"]),
+-                                    conf=self._conf, classes=self._clases, verbose=False)[0]
++                ro = self.obj.track(frame, persist=True, tracker=SEGUIDOR_OBJETOS, imgsz=self.imgsz_obj,
++                                    conf=self._conf, classes=self._clases, verbose=False,
++                                    device=self.disp, half=self.media)[0]
++            self.ms["objetos"] = 1000 * (time.perf_counter() - t0)
+             self._ultimos_objetos = []
+             if ro.boxes is not None and ro.boxes.id is not None:
+                 for caja, oid, cls, cf in zip(ro.boxes.xyxy.cpu().numpy(), ro.boxes.id.int().cpu().tolist(),
+@@ -178,16 +247,23 @@ class AnalizadorRostros:
+     def disponible(self) -> bool:
+         return self.det is not None
+ 
+-    def detectar(self, frame: np.ndarray, emociones: bool) -> list[Rostro]:
++    def detectar(self, frame: np.ndarray, emociones: bool, ancho_max: int = 0) -> list[Rostro]:
++        """`ancho_max`: YuNet busca los rostros en una copia reducida a ese ancho (antes recorría la imagen completa
++        en cada cuadro, lo que en una laptop costaba casi tanto como la pose). Las cajas y las marcas se devuelven
++        en coordenadas de la imagen original, y la expresión se lee del rostro a resolución completa."""
+         if self.det is None:
+             return []
+         h, w = frame.shape[:2]
+-        self.det.setInputSize((w, h))
+-        _, caras = self.det.detect(frame)
++        esc = ancho_max / w if 0 < ancho_max < w else 1.0
++        chica = cv2.resize(frame, (int(w * esc), int(h * esc))) if esc < 1 else frame
++        self.det.setInputSize((chica.shape[1], chica.shape[0]))
++        _, caras = self.det.detect(chica)
+         out = []
+         if caras is None:
+             return out
+         for f in caras:
++            f = np.asarray(f, dtype=np.float32).copy()
++            f[:14] /= esc                                   # caja (x, y, ancho, alto) y 5 marcas, a tamaño original
+             x, y, cw, ch = f[:4]
+             rostro = Rostro(caja=np.array([x, y, x + cw, y + ch], dtype=float))
+             if emociones and self.fer is not None:
+diff --git a/vigia/rendimiento.py b/vigia/rendimiento.py
+new file mode 100644
+index 0000000..71c4885
+--- /dev/null
++++ b/vigia/rendimiento.py
+@@ -0,0 +1,32 @@
++"""Perfiles de rendimiento: cuánto trabajo hace VigIA en cada cuadro.
++
++La precisión del análisis en vivo depende sobre todo de cuántos cuadros por segundo alcanza la computadora:
++un tirón de mochila o un golpe duran 1 a 2 s, y con 1-2 cuadros por segundo caen entre dos cuadros. Con
++10 cuadros por segundo se ven igual que en un video analizado en cámara lenta. El perfil «rápido» baja el
++tamaño de las imágenes que reciben los modelos para llegar a esa cantidad en una laptop sin tarjeta gráfica.
++
++  normal  lo que diga config.yaml
++  rapido  personas a 384 px, objetos a 480 px, rostros cada 3 cuadros, imagen de trabajo de 800 px de ancho.
++          Pierde algo de alcance (una mochila a más de 5-6 m se ve peor), no de exactitud de cerca, que es
++          como se prueba en clase o en una feria.
++"""
++from __future__ import annotations
++
++PERFILES: dict[str, dict] = {
++    "normal": {},
++    "rapido": {
++        "modelos": {"tamano_imagen": 384, "tamano_imagen_objetos": 480, "objetos_cada_n_frames": 3},
++        "procesamiento": {"ancho_max": 800, "rostros_cada_n_frames": 3, "ancho_rostros": 400},
++    },
++}
++
++
++def aplicar_perfil(cfg: dict, nombre: str | None) -> str:
++    """Aplica el perfil sobre la configuración (in situ) y devuelve el nombre aplicado."""
++    nombre = (nombre or "normal").lower().replace("á", "a")
++    if nombre not in PERFILES:
++        raise ValueError(f"Perfil desconocido «{nombre}»: use {', '.join(PERFILES)}")
++    for seccion, valores in PERFILES[nombre].items():
++        cfg.setdefault(seccion, {}).update(valores)
++    cfg.setdefault("procesamiento", {})["perfil"] = nombre
++    return nombre
+diff --git a/vigia/servidor.py b/vigia/servidor.py
+index a1a0eed..b5d38aa 100644
+--- a/vigia/servidor.py
++++ b/vigia/servidor.py
+@@ -507,6 +507,21 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
+                                 status_code=400)
+         return JSONResponse({"ok": True, "pausado": quiere})
+ 
++    async def modo_video(req: Request):
++        """Video subido: {"detallado": true} = cuadro a cuadro (cámara lenta si hace falta); false = tiempo real."""
++        t = sis.trabajadores.get(req.path_params["cid"])
++        if t is None:
++            return JSONResponse({"error": "La cámara ya no existe."}, status_code=404)
++        try:
++            datos = await req.json()
++        except ValueError:
++            datos = {}
++        quiere = bool(datos.get("detallado", not t.estado.get("detallado", True)))
++        if not t.modo_detallado(quiere):
++            return JSONResponse({"error": "Solo los videos subidos tienen modo detallado; una cámara en vivo siempre "
++                                          "va en tiempo real."}, status_code=400)
++        return JSONResponse({"ok": True, "detallado": quiere})
++
+     async def reiniciar(_):
+         return JSONResponse({"ok": True, "borradas": sis.reiniciar()})
+ 
+@@ -528,6 +543,7 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
+         Route("/api/alertas.csv", alertas_csv),
+         Route("/api/reiniciar", reiniciar, methods=["POST"]),
+         Route("/api/camaras/{cid}/pausa", pausa, methods=["POST"]),
++        Route("/api/camaras/{cid}/modo", modo_video, methods=["POST"]),
+         Route("/aviso", aviso),
+         Route("/capturas/{nombre}", archivo_captura),
+         Route("/api/camaras/{cid}/zonas", zonas, methods=["GET", "PUT"]),
+diff --git a/web/static/app.js b/web/static/app.js
+index a2a59f8..7160362 100644
+--- a/web/static/app.js
++++ b/web/static/app.js
+@@ -42,7 +42,7 @@ function pintarCamaras() {
+     if (!tarjeta) {
+       tarjeta = el("article", "camara"); tarjeta.dataset.id = c.id;
+       const cab = el("div", "camara-cab");
+-      cab.append(el("h3", null, c.nombre), el("span", "meta"));
++      cab.append(el("h3", null, c.nombre), el("span", "meta"), el("span", "precision"));
+       const quitar = el("button", "quitar", "✕"); quitar.title = "Quitar cámara";
+       quitar.onclick = async () => {
+         if (!confirm(`¿Quitar la cámara «${c.nombre}»?`)) return;
+@@ -73,7 +73,24 @@ function pintarCamaras() {
+           pausa.disabled = false;
+         }
+       };
+-      cab.append(pausa, quitar);
++      // Video subido: «Detallado» analiza cada segundo completo (cámara lenta si la PC no alcanza);
++      // «Tiempo real» lo pasa a su velocidad y se salta lo que no alcanza a ver, igual que una cámara en vivo
++      const modo = el("button", "modo"); modo.hidden = true;
++      modo.onclick = async () => {
++        const ahora = estado.camaras.find((x) => x.id === c.id) || {};
++        const quiere = !ahora.detallado;
++        modo.disabled = true;
++        try {
++          await api(`/api/camaras/${c.id}/modo`, { method: "POST", body: JSON.stringify({ detallado: quiere }) });
++          if (ahora.id) ahora.detallado = quiere;
++          pintarCamaras();
++        } catch (e) {
++          alert(`No se pudo cambiar el modo del video: ${e.message}`);
++        } finally {
++          modo.disabled = false;
++        }
++      };
++      cab.append(modo, pausa, quitar);
+       const video = el("div", "video");
+       const img = el("img"); img.alt = `Video de ${c.nombre}`;
+       // Cada cuadro se pide por separado en vez de mantener un video MJPEG abierto: el navegador solo admite
+@@ -96,6 +113,28 @@ function pintarCamaras() {
+     tarjeta.querySelector(".meta").textContent = c.terminado ? `video terminado · ${c.personas} personas`
+       : c.pausado ? `en pausa · ${c.personas} personas`
+       : `${c.fps.toFixed(1)} fps${lento} · ${c.personas} personas`;
++    const modo = tarjeta.querySelector(".modo");
++    modo.hidden = c.detallado == null;
++    modo.textContent = c.detallado ? "Detallado" : "Tiempo real";
++    modo.title = c.detallado
++      ? "Analiza cada segundo del video completo (va en cámara lenta si la PC no alcanza). Clic: tiempo real"
++      : "El video va a su velocidad y se salta lo que la PC no alcanza a analizar. Clic: detallado";
++    modo.classList.toggle("activa", !!c.detallado);
++    // precisión esperada: cuántos cuadros se analizan por cada segundo de lo que pasa frente a la cámara
++    const prec = tarjeta.querySelector(".precision");
++    prec.hidden = !c.precision;
++    if (c.precision) {
++      prec.textContent = `precisión ${c.precision}`;
++      prec.className = `precision ${c.precision}`;
++      const etapas = Object.entries(c.etapas || {}).map(([k, v]) => `${k}: ${v} ms`).join(", ");
++      const acel = c.aceleracion ? ` · modelos: personas en ${c.aceleracion.personas}, objetos en ${c.aceleracion.objetos}` : "";
++      prec.title = {
++        alta: "7 o más cuadros por segundo de acción: se ven los golpes y los tirones.",
++        media: "4 a 7 cuadros por segundo: se pueden perder los golpes más rápidos.",
++        baja: "Menos de 4 cuadros por segundo: los tirones y golpes pueden caer entre dos cuadros. " +
++          "Use el perfil rápido (python -m vigia --rapido), acelere los modelos o deje una sola cámara.",
++      }[c.precision] + `\nCada cuadro: ${etapas}${acel}`;
++    }
+     const boton = tarjeta.querySelector(".pausa");
+     boton.hidden = !c.pausable;
+     boton.textContent = c.terminado ? "↻" : c.pausado ? "▶" : "⏸";
+diff --git a/web/static/style.css b/web/static/style.css
+index ae73961..c304e55 100644
+--- a/web/static/style.css
++++ b/web/static/style.css
+@@ -61,6 +61,14 @@ button, input, select { font: inherit; color: inherit; }
+   font-size: 13px; line-height: 1; padding: 4px 8px; }
+ .camara-cab .pausa:hover { border-color: var(--acento); }
+ .camara-cab .pausa.activa { border-color: var(--acento); color: var(--acento); }
++.camara-cab .modo { background: none; border: 1px solid var(--borde); border-radius: 6px; color: #cdd3db; cursor: pointer;
++  font-size: 12px; padding: 4px 8px; white-space: nowrap; }
++.camara-cab .modo:hover, .camara-cab .modo.activa { border-color: var(--acento); }
++.camara-cab .precision { font-size: 11px; padding: 2px 7px; border-radius: 999px; white-space: nowrap; cursor: help;
++  border: 1px solid currentColor; }
++.camara-cab .precision.alta { color: #3ecf8e; }
++.camara-cab .precision.media { color: #e8b84a; }
++.camara-cab .precision.baja { color: #ef6b6b; }
+ .video { position: relative; background: #050607; aspect-ratio: 16 / 9; }
+ .video img { width: 100%; height: 100%; object-fit: contain; display: block; }
+ .video .estado { position: absolute; inset: 0; display: grid; place-items: center; color: var(--tenue); text-align: center; padding: 20px; }
+@@ -183,3 +191,8 @@ legend { color: var(--texto); padding: 0 6px; font-weight: 600; }
+ .descarga progress { width: 100%; height: 10px; }
+ .alerta .veces { margin-left: 6px; padding: 0 6px; border-radius: 999px; background: rgba(229, 83, 75, .18); color: #ff9b94;
+   font-size: 11px; letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
++@media (max-width: 600px) {          /* en el celular los botones de la cámara bajan a otra línea en vez de cortarse */
++  .camara-cab { flex-wrap: wrap; row-gap: 6px; }
++  .camara-cab h3 { flex: 1 0 auto; }
++  .camara-cab .meta { order: 9; flex-basis: 100%; margin-left: 0; }
++}
