@@ -9,6 +9,8 @@ let camaras = [];
 let elegido = null;
 let fase = "elegir";            // elegir | cuenta | curso | resultado
 let inicio = 0, reloj = null, cierre = null;
+let estadoCamaras = [];          // último estado de las cámaras (para la segunda mirada)
+let revisionPedida = false;      // en este intento ya se pidió revisar cuadro a cuadro
 
 async function api(url, opciones = {}) {
   const r = await fetch(url, { headers: { "Content-Type": "application/json" }, ...opciones });
@@ -76,7 +78,7 @@ function empezar() {
     if (fase !== "cuenta") return clearInterval(paso);
     if (n > 0) return mostrarCapa(n, "¡Prepárate!");
     clearInterval(paso);
-    fase = "curso"; inicio = performance.now(); ocultarCapa();
+    fase = "curso"; inicio = performance.now(); revisionPedida = false; ocultarCapa();
     $("#barra-tiempo").hidden = false;
     reloj = setInterval(tic, 200);
   }, 1000);
@@ -85,7 +87,27 @@ function tic() {
   const s = (performance.now() - inicio) / 1000, quedan = Math.max(0, elegido.limite - s);
   $("#barra-relleno").style.width = `${(100 * quedan) / elegido.limite}%`;
   $("#consigna-texto").textContent = `${elegido.instruccion} Quedan ${Math.ceil(quedan)} s.`;
-  if (quedan <= 0) terminar(false);
+  if (quedan <= 0 && !esperarRevision(s)) terminar(false);
+}
+// Antes de decir «no te detectó»: si la PC analiza pocos cuadros por segundo en vivo, VigIA revisa cuadro a cuadro
+// los últimos segundos del intento (segunda mirada). Mientras revisa, el reto espera (como máximo 90 s más).
+function esperarRevision(s) {
+  const c = estadoCamaras.find((x) => x.id === camara());
+  const rev = c && c.revision;
+  if (!rev || !elegido.tipos || s > elegido.limite + 90) return false;
+  if (!revisionPedida && rev.activa) {
+    revisionPedida = true;
+    api(`/api/camaras/${c.id}/revisar`, { method: "POST", body: JSON.stringify({ segundos: Math.min(elegido.limite, 15) }) })
+      .catch((e) => console.error(e));
+    $("#consigna-texto").textContent = "Tiempo. VigIA está revisando cuadro a cuadro los últimos segundos…";
+    return true;
+  }
+  if (revisionPedida && (rev.revisando || rev.pendientes || s < elegido.limite + 2)) {
+    $("#consigna-texto").textContent = "Tiempo. VigIA está revisando cuadro a cuadro los últimos segundos…"
+      + (rev.revisando ? ` ${rev.progreso} %` : "");
+    return true;
+  }
+  return false;
 }
 async function terminar(detectado, alerta = null) {
   if (fase !== "curso") return;
@@ -119,6 +141,7 @@ function conectar() {
   es.onmessage = (m) => {
     const { evento, datos: d } = JSON.parse(m.data);
     if (evento === "estado") {
+      estadoCamaras = d.camaras;
       actualizarCamaras(d.camaras);
       $("#btn-esqueleto").setAttribute("aria-pressed", String(!!d.solo_esqueleto));
       if (fase === "curso" && elegido?.emocion) {

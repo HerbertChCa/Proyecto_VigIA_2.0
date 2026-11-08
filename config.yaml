@@ -76,6 +76,15 @@ procesamiento:
   repetir_videos: false        # true = vuelven a empezar solos (útil en una feria, sin nadie al lado)
   videos_detallado: true       # false = los videos subidos empiezan en «tiempo real» (como una cámara en vivo)
   objetos_cada_n_frames_videos: 2   # en los videos subidos el detector de objetos corre 1 de cada 2 cuadros
+  # Segunda mirada (cámaras en vivo): si la PC analiza pocos cuadros por segundo, cuando hay algo que podría ser
+  # un incidente rápido (dos personas juntas, un movimiento brusco) se vuelve a analizar cuadro a cuadro ese tramo,
+  # guardado en memoria. Sus alertas llegan unos segundos tarde, pero no se pierden. Vea vigia/revision.py
+  revision:
+    activa: true
+    solo_si_fps_menor_a: 8     # con 8 o más cuadros por segundo en vivo no hace falta
+    antes: 4                   # segundos antes y después de la sospecha que se revisan
+    despues: 3
+    memoria: 15                # segundos que se guardan (unos 10 MB)
   ancho_max: 960               # se reduce el frame antes de analizarlo
 
 privacidad:

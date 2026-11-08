@@ -26,6 +26,13 @@ RETOS = [
     {"id": "hurto", "titulo": "Llévate la mochila de otro (en pareja)",
      "instruccion": "Uno deja su mochila en el piso y se aleja; el otro se acerca y se la lleva.",
      "tipos": ["hurto"], "limite": 50},
+    {"id": "arrebato", "titulo": "Arrebata una mochila (en pareja)",
+     "instruccion": "Uno lleva la mochila puesta o en la mano; el otro se acerca, se la quita y se aleja rápido. "
+                    "Sin empujones fuertes.",
+     "tipos": ["hurto", "robo_huida"], "limite": 30},
+    {"id": "forcejeo", "titulo": "Simulen un forcejeo (en pareja)",
+     "instruccion": "Tómense de los brazos y forcejeen unos segundos, de lado a la cámara. Sin golpes reales.",
+     "tipos": ["violencia"], "limite": 25},
     {"id": "sonrisa", "titulo": "Sonríe a la cámara",
      "instruccion": "Mira de frente a la cámara y sonríe. Requiere el análisis de expresiones.",
      "emocion": "alegría", "limite": 15},

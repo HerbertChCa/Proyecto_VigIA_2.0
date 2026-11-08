@@ -90,7 +90,16 @@ function pintarCamaras() {
           modo.disabled = false;
         }
       };
-      cab.append(modo, pausa, quitar);
+      // Segunda mirada a pedido: revisa cuadro a cuadro los últimos 10 s (solo cámaras en vivo)
+      const revisar = el("button", "revisar", "Revisar 10 s"); revisar.hidden = true;
+      revisar.title = "Vuelve a analizar cuadro a cuadro los últimos 10 segundos, como un video en cámara lenta";
+      revisar.onclick = async () => {
+        revisar.disabled = true;
+        try { await api(`/api/camaras/${c.id}/revisar`, { method: "POST", body: JSON.stringify({ segundos: 10 }) }); }
+        catch (e) { alert(`No se pudo revisar: ${e.message}`); }
+        finally { setTimeout(() => { revisar.disabled = false; }, 1500); }
+      };
+      cab.append(revisar, modo, pausa, quitar);
       const video = el("div", "video");
       const img = el("img"); img.alt = `Video de ${c.nombre}`;
       // Cada cuadro se pide por separado en vez de mantener un video MJPEG abierto: el navegador solo admite
@@ -105,6 +114,7 @@ function pintarCamaras() {
       img.onerror = () => setTimeout(cargar, 1000);             // aún sin imagen o cámara caída
       setTimeout(cargar, 0);
       video.append(img, el("div", "estado"));
+      video.append(el("div", "segunda-mirada"));
       tarjeta.append(cab, video, el("div", "emociones"));
       cont.append(tarjeta);
     }
@@ -135,6 +145,13 @@ function pintarCamaras() {
           "Use el perfil rápido (python -m vigia --rapido), acelere los modelos o deje una sola cámara.",
       }[c.precision] + `\nCada cuadro: ${etapas}${acel}`;
     }
+    // segunda mirada: con pocos cuadros por segundo en vivo, los incidentes rápidos se revisan cuadro a cuadro
+    const rev = c.revision;
+    tarjeta.querySelector(".revisar").hidden = !rev;
+    const sm = tarjeta.querySelector(".segunda-mirada");
+    sm.hidden = !(rev && (rev.revisando || rev.pendientes));
+    if (!sm.hidden) sm.textContent = rev.revisando ? `Segunda mirada: revisando cuadro a cuadro… ${rev.progreso} %`
+      : "Segunda mirada: esperando los segundos siguientes…";
     const boton = tarjeta.querySelector(".pausa");
     boton.hidden = !c.pausable;
     boton.textContent = c.terminado ? "↻" : c.pausado ? "▶" : "⏸";
@@ -367,6 +384,40 @@ $("#form-camara").onsubmit = async (e) => {
 // ------------------------------------------------------------------ ajustes
 const leer = (o, ruta) => ruta.split(".").reduce((x, k) => x?.[k], o);
 function escribir(o, ruta, v) { const k = ruta.split("."); const u = k.pop(); k.reduce((x, c) => (x[c] ??= {}), o)[u] = v; }
+// ------------------------------------------------------------------ chequeo previo a la demostración
+const ICONO_CHEQUEO = { ok: "✓", aviso: "!", mal: "✕", pendiente: "…" };
+let relojChequeo = null;
+async function pintarChequeo() {
+  const cont = $("#chequeo-lista");
+  const partes = await Promise.all(estado.camaras.map((c) =>
+    api(`/api/camaras/${c.id}/chequeo`).catch((e) => ({ nombre: c.nombre, error: e.message }))));
+  cont.replaceChildren();
+  if (!partes.length) cont.append(el("p", "ayuda-linea", "No hay cámaras. Agregue una con «+ Cámara»."));
+  for (const r of partes) {
+    const bloque = el("section", "chequeo");
+    const cab = el("h4", null, r.nombre);
+    if (!r.error) cab.append(el("span", `chequeo-veredicto ${r.listo ? "ok" : "mal"}`, r.listo ? "Lista" : "Falta corregir"));
+    bloque.append(cab);
+    if (r.error) bloque.append(el("p", "ayuda-linea", r.error));
+    for (const p of r.puntos || []) {
+      const fila = el("div", `chequeo-punto ${p.estado}`);
+      fila.append(el("span", "chequeo-icono", ICONO_CHEQUEO[p.estado] || "?"));
+      const txt = el("div");
+      txt.append(el("strong", null, p.nombre), el("span", null, ` ${p.detalle}`));
+      if (p.consejo) txt.append(el("div", "chequeo-consejo", p.consejo));
+      fila.append(txt);
+      bloque.append(fila);
+    }
+    cont.append(bloque);
+  }
+}
+$("#btn-chequeo").onclick = async () => {
+  $("#dlg-chequeo").showModal();
+  await pintarChequeo();
+  clearInterval(relojChequeo);
+  relojChequeo = setInterval(() => { if ($("#dlg-chequeo").open) pintarChequeo(); else clearInterval(relojChequeo); }, 2000);
+};
+
 $("#btn-ajustes").onclick = async () => {
   const aj = await api("/api/ajustes");
   const cont = $("#clases-objeto");                 // las clases dependen del detector (COCO o vocabulario abierto)

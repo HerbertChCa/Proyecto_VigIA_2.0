@@ -522,6 +522,28 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
                                           "va en tiempo real."}, status_code=400)
         return JSONResponse({"ok": True, "detallado": quiere})
 
+    async def revisar(req: Request):
+        """Segunda mirada a pedido: revisa cuadro a cuadro los últimos {"segundos": 10} de una cámara en vivo."""
+        t = sis.trabajadores.get(req.path_params["cid"])
+        if t is None:
+            return JSONResponse({"error": "La cámara ya no existe."}, status_code=404)
+        try:
+            datos = await req.json()
+        except ValueError:
+            datos = {}
+        segundos = min(max(float(datos.get("segundos", 10)), 2.0), t._cfg_revision()["memoria"])
+        if not t.revisar_ultimos(segundos):
+            return JSONResponse({"error": "La segunda mirada es para cámaras en vivo; un video subido se revisa "
+                                          "con el modo «Detallado»."}, status_code=400)
+        return JSONResponse({"ok": True, "segundos": segundos})
+
+    async def chequeo(req: Request):
+        """Chequeo previo a una demostración: luz, distancia, cámara quieta, velocidad, objetos y zonas."""
+        t = sis.trabajadores.get(req.path_params["cid"])
+        if t is None:
+            return JSONResponse({"error": "La cámara ya no existe."}, status_code=404)
+        return JSONResponse(t.chequeo())
+
     async def reiniciar(_):
         return JSONResponse({"ok": True, "borradas": sis.reiniciar()})
 
@@ -544,6 +566,8 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
         Route("/api/reiniciar", reiniciar, methods=["POST"]),
         Route("/api/camaras/{cid}/pausa", pausa, methods=["POST"]),
         Route("/api/camaras/{cid}/modo", modo_video, methods=["POST"]),
+        Route("/api/camaras/{cid}/revisar", revisar, methods=["POST"]),
+        Route("/api/camaras/{cid}/chequeo", chequeo),
         Route("/aviso", aviso),
         Route("/capturas/{nombre}", archivo_captura),
         Route("/api/camaras/{cid}/zonas", zonas, methods=["GET", "PUT"]),

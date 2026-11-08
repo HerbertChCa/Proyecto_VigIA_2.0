@@ -33,6 +33,7 @@
     <a class="btn" href="/aviso" target="_blank" title="Aviso de videovigilancia para imprimir">Aviso</a>
     <button class="btn" id="btn-zonas">Zonas</button>
     <button class="btn" id="btn-ajustes">Ajustes</button>
+    <button class="btn" id="btn-chequeo" title="¿Está todo listo para una demostración? Luz, distancia, cámara quieta, velocidad, objetos y zonas">Chequeo</button>
     <button class="btn peligro" id="btn-limpiar" title="Borra todas las alertas y sus fotos, y reinicia lo que VigIA aprendió de la escena. Las cámaras, zonas y ajustes se conservan.">Borrar historial</button>
     <button class="btn primario" id="btn-camara">+ Cámara</button>
   </nav>
@@ -76,6 +77,14 @@
   <form method="dialog" class="dlg-cab"><h3 id="cap-titulo">Captura</h3><button class="cerrar" aria-label="Cerrar">×</button></form>
   <img id="cap-img" alt="Captura de la alerta">
   <p id="cap-texto" class="explicacion"></p>
+</dialog>
+
+<!-- Chequeo previo a una demostración -->
+<dialog id="dlg-chequeo" class="dialogo ancho">
+  <form method="dialog" class="dlg-cab"><h3>Chequeo antes de la demostración</h3><button class="cerrar" aria-label="Cerrar">×</button></form>
+  <p class="ayuda-linea">Se mide con lo que cada cámara vio en los últimos 30 s y se actualiza solo. Párense donde harán las
+    pruebas, caminen, muestren la mochila y simulen una caída: los puntos «pendiente» se completan solos.</p>
+  <div id="chequeo-lista"></div>
 </dialog>
 
 <!-- Búsqueda con CLIP -->

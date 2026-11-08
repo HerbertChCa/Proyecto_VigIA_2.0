@@ -15,6 +15,8 @@ from .dibujo import cajas_cabeza, difuminar, dibujar, solo_esqueleto
 from .historial import Historial
 from .objetos import FiltroObjetos
 from .reglas import Reglas
+from .chequeo import Sondeo, evaluar
+from .revision import REVISION, Memoria, Revisor, sospecha
 from .tipos import Observacion
 
 log = logging.getLogger("vigia.camara")
@@ -36,6 +38,7 @@ class Lector:
         self.es_enlace = isinstance(self.fuente, str) and self.fuente.lower().startswith(("http://", "https://"))
         self.fps_analisis = max(1.0, float(fps_analisis))
         self.repetir = repetir
+        self.memoria: Optional[Memoria] = None   # cámara en vivo: últimos segundos para la segunda mirada
         self.detallado = detallado        # video: True = cuadro a cuadro (cámara lenta), False = a su velocidad real
         self.frame: Optional[np.ndarray] = None
         self.conectada = False
@@ -104,6 +107,8 @@ class Lector:
                 self.frame = f
                 self._numero += 1
             self.conectada = True
+            if self.memoria is not None:
+                self.memoria.guardar(f, time.time())
 
     def _leer_video(self, cap, fps_archivo: float):
         """Dos modos, que se pueden cambiar mientras corre (botón de la tarjeta):
@@ -215,6 +220,10 @@ class Trabajador:
         self._ms: dict[str, float] = {}             # milisegundos de cada etapa en el último cuadro
         self._inicio_paso = time.perf_counter()
         self.lector = None
+        self.revisor: Optional[Revisor] = None
+        self._vivo_tipos: dict[str, float] = {}     # último instante en que la vista en vivo reportó cada tipo
+        self._ult_sospecha = -1e9
+        self.sondeo = Sondeo()                      # medidas para el chequeo previo (luz, distancia, cámara quieta…)
         self.sim = None
         self.detector = None
         self.rostros = None
@@ -232,6 +241,11 @@ class Trabajador:
                 self.lector = Lector(self.fuente, proc["fps_objetivo"], bool(proc.get("repetir_videos", False)),
                                      bool(proc.get("videos_detallado", True)))
                 self.detector = DetectorYOLO(self.cfg["modelos"])
+                rev = self._cfg_revision()
+                if rev["activa"]:
+                    self.lector.memoria = Memoria(rev["memoria"], rev["fps"], proc["ancho_max"])
+                    self.revisor = Revisor(self.cfg, self.lector.memoria, lambda: DetectorYOLO(self.cfg["modelos"]),
+                                           self._emitir_revision, lambda: self.reglas.ignorar)
                 self.rostros = AnalizadorRostros(self.cfg["modelos"]["rostros"], self.cfg["modelos"]["emociones"])
         except Exception as e:  # p. ej. falta instalar ultralytics
             log.exception("No se pudo iniciar la cámara %s", self.id)
@@ -289,6 +303,53 @@ class Trabajador:
         self.estado["detallado"] = detallado
         self._tiempos.clear()
         return True
+
+    def _cfg_revision(self) -> dict:
+        return {**REVISION, **(self.cfg["procesamiento"].get("revision") or {})}
+
+    def revisar_ultimos(self, segundos: float) -> bool:
+        """El operador pide revisar cuadro a cuadro los últimos segundos (botón «Revisar» de la tarjeta)."""
+        if self.revisor is None or (self.lector is not None and self.lector.finito):
+            return False
+        ahora = time.time()
+        self.revisor.pedir(ahora - segundos, ahora, "pedido del operador", forzar=True)
+        return True
+
+    def _emitir_revision(self, e, frame, obs, tramo) -> bool:
+        """Una alerta encontrada por la segunda mirada. No se repite lo que la vista en vivo ya avisó."""
+        if self._vivo_tipos.get(e.tipo, -1e9) >= tramo["desde"] - 2.0:
+            return False
+        priv = self.cfg["privacidad"]
+        img = frame.copy()
+        if priv["difuminar_rostros"]:
+            difuminar(img, cajas_cabeza(obs))       # sin detector de rostros: la cabeza estimada con la pose
+        esqueleto = bool(priv.get("solo_esqueleto"))
+        if esqueleto:
+            solo_esqueleto(img, obs)
+        en_alerta = {p.id for p in obs.personas for c in e.cajas if np.allclose(p.caja, c)}
+        dibujar(img, obs, self.zonas, en_alerta, {}, f"{self.nombre}  |  SEGUNDA MIRADA (revision cuadro a cuadro)",
+                grueso=esqueleto)
+        hace = max(0.0, time.time() - obs.t)
+        e.explicacion += (f" Detectado en la segunda mirada: VigIA volvió a analizar cuadro a cuadro los "
+                          f"{tramo['hasta'] - tramo['desde']:.0f} s alrededor de la sospecha "
+                          f"({', '.join(tramo['motivos'])}); ocurrió hace {hace:.0f} s.")
+        e.clave = "revision:" + e.clave
+        self._vivo_tipos[e.tipo] = time.time()
+        self.alertas.procesar(self.id, [e], img)
+        return True
+
+    def chequeo(self) -> dict:
+        """¿Está lista esta cámara para una demostración? Lo que mide el Sondeo en los últimos 30 s."""
+        priv = self.cfg["privacidad"]
+        rev = self.estado.get("revision") or {}
+        res = evaluar(self.sondeo, float(self.estado.get("fps") or 0), bool(rev.get("activa")) or bool(
+            self.revisor is not None and float(self.estado.get("fps") or 0) < self._cfg_revision()["solo_si_fps_menor_a"]),
+            {"zonas": self.zonas, "aceleracion": getattr(self.detector, "aceleracion", None),
+             "vocabulario": getattr(self.detector, "abierto", True) or self.demo,
+             "emociones": priv.get("analizar_emociones"),
+             "video_detallado": bool(self.lector is not None and self.lector.finito and self.lector.detallado)})
+        res.update(id=self.id, nombre=self.nombre)
+        return res
 
     def _reloj(self) -> float:
         """Hora para el análisis: la del sistema menos el tiempo que el video estuvo en pausa."""
@@ -388,6 +449,10 @@ class Trabajador:
                 if est and "emo_etiqueta" in est.estado:
                     emociones[p.id] = est.estado["emo_etiqueta"]
 
+        try:                         # antes de difuminar: la luz se mide sobre la imagen real
+            self.sondeo.actualizar(frame, obs)
+        except Exception:  # noqa: BLE001 - el chequeo nunca debe frenar el análisis
+            log.debug("sondeo", exc_info=True)
         esqueleto = bool(priv.get("solo_esqueleto"))
         if priv["difuminar_rostros"]:
             difuminar(frame, cajas_cabeza(obs))
@@ -396,6 +461,16 @@ class Trabajador:
         self.crudo = frame.copy()
         self._tiempos.append(ahora)
         fps = (len(self._tiempos) - 1) / (self._tiempos[-1] - self._tiempos[0]) if len(self._tiempos) > 1 else 0.0
+        if self.revisor is not None and not self.lector.finito:
+            for e in eventos:
+                self._vivo_tipos[e.tipo] = t
+            rev = self._cfg_revision()
+            # con pocos cuadros por segundo, lo que podría ser un incidente rápido se revisa cuadro a cuadro
+            if 0 < fps < rev["solo_si_fps_menor_a"] and t - self._ult_sospecha >= rev["pausa_entre_sospechas"]:
+                motivo = sospecha(obs, self.reglas, rev)
+                if motivo:
+                    self._ult_sospecha = t
+                    self.revisor.pedir(t - rev["antes"], t + rev["despues"], motivo)
         velocidad = None
         if self.lector is not None and self.lector.finito and self.lector.detallado:
             velocidad = round(fps * self.lector.paso_video, 2)      # segundos de video analizados por segundo real
@@ -417,6 +492,9 @@ class Trabajador:
         self.estado.update(fps=round(fps, 1), personas=len(obs.personas),
                            emociones=dict(Counter(emociones.values())), error=None, ancho=w, alto=h,
                            pausable=self.pausable, pausado=self._pausa_desde is not None, velocidad=velocidad)
+        if self.revisor is not None and not self.lector.finito:
+            rev = self._cfg_revision()
+            self.estado["revision"] = {**self.revisor.estado, "activa": 0 < fps < rev["solo_si_fps_menor_a"]}
         if not self.demo:
             detallado = bool(self.lector.finito and self.lector.detallado)
             # precisión esperada según los cuadros que se analizan por cada segundo de lo que pasa delante de la
@@ -438,3 +516,5 @@ class Trabajador:
         self._parar = True
         if self.lector:
             self.lector.detener()
+        if self.revisor:
+            self.revisor.detener()

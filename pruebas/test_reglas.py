@@ -1214,6 +1214,10 @@ class Arrebato(unittest.TestCase):
     solo vigilaba objetos que quedaron quietos, así que estos casos nunca daban alerta."""
 
     def escena(self, mochila_de, segundos=9.0, camara=lambda t: 0.0, oid_tras_tiron=None, clase="mochila"):
+        return [e for e in recorrer_escena(self.cuadros(mochila_de, camara, oid_tras_tiron, clase), segundos)
+                if e.tipo == "hurto"]
+
+    def cuadros(self, mochila_de, camara=lambda t: 0.0, oid_tras_tiron=None, clase="mochila"):
         """mochila_de(t) -> 'a', 'b', 'ambos' o None; la víctima #1 queda quieta en x=400 y el ladrón #2 llega
         desde la derecha y huye hacia la derecha. camara(t) desplaza toda la imagen (un celular que sigue al ladrón)."""
         from vigia.simulador import H
@@ -1249,7 +1253,7 @@ class Arrebato(unittest.TestCase):
                 oid = oid_tras_tiron if (oid_tras_tiron and quien == "b") else 70
                 objetos.append(Objeto(oid, clase, c))
             return [pa, pb], objetos
-        return [e for e in recorrer_escena(cuadros, segundos) if e.tipo == "hurto"]
+        return cuadros
 
     @staticmethod
     def tiron(t):
@@ -1828,3 +1832,225 @@ class RendimientoEnVivo(unittest.TestCase):
                 self.assertAlmostEqual(t2 - t1, 0.1, delta=0.02)  # y desde ahí, 0.1 s de video por cuadro
             finally:
                 lector.detener()
+
+
+class SegundaMirada(unittest.TestCase):
+    """Feria: en vivo, con una PC que analiza 2-3 cuadros por segundo, un tirón de mochila de 2 s se perdía. La
+    segunda mirada guarda los últimos segundos y, ante una sospecha, los revisa cuadro a cuadro."""
+
+    def test_memoria_guarda_diez_cuadros_por_segundo(self):
+        from vigia.revision import Memoria
+        m = Memoria(segundos=2.0, fps=10, ancho=320)
+        img = np.full((480, 640, 3), 120, np.uint8)
+        guardados = sum(m.guardar(img, k / 30) for k in range(90))     # 3 s de una cámara a 30 fps
+        self.assertAlmostEqual(guardados, 30, delta=2)
+        self.assertLessEqual(len(m), 20)                               # solo los últimos 2 s
+        tramo = m.entre(2.0, 2.5)
+        self.assertTrue(4 <= len(tramo) <= 6)
+        import cv2
+        self.assertEqual(cv2.imdecode(tramo[0][1], cv2.IMREAD_COLOR).shape[1], 320)   # reducido para ocupar poco
+
+    def test_sospecha_con_dos_personas_juntas_y_no_con_una_sola(self):
+        from vigia.revision import REVISION, sospecha
+        reglas = Reglas(copy.deepcopy(CFG["reglas"]))
+        a = persona(1, esqueleto(400, 480, "quieto", 0, 0, 1, 0))
+        b = persona(2, esqueleto(470, 480, "quieto", 0, 0, 1, 0))
+        lejos = persona(3, esqueleto(900, 480, "quieto", 0, 0, 1, 0))
+        self.assertIn("juntas", sospecha(Observacion(t=0, personas=[a, b]), reglas, REVISION))
+        self.assertIsNone(sospecha(Observacion(t=0, personas=[a, lejos]), reglas, REVISION))
+        self.assertIsNone(sospecha(Observacion(t=0, personas=[a]), reglas, REVISION))
+
+    def _revisor(self, emitir):
+        """Un revisor cuyo «detector» devuelve, para cada instante, la escena del arrebato de las pruebas de clase."""
+        from vigia.revision import Memoria, Revisor
+        cuadros = Arrebato().cuadros(Arrebato.tiron)
+
+        class Detector:
+            abierto = True
+            cada_n = None
+
+            def procesar(self, frame, t):
+                ps, objs = cuadros(round(t, 1))
+                return Observacion(t=t, personas=ps, objetos=objs)
+
+        mem = Memoria(segundos=12, fps=10, ancho=ANCHO)
+        negro = np.zeros((ALTO, ANCHO, 3), np.uint8)
+        for k in range(90):
+            mem.guardar(negro, k / 10)
+        cfg = copy.deepcopy(CFG)
+        rev = Revisor(cfg, mem, Detector, emitir)
+        rev.detener()                                                  # se maneja a mano
+        return rev
+
+    def test_encuentra_el_arrebato_que_la_vista_en_vivo_no_vio(self):
+        emitidos = []
+        rev = self._revisor(lambda e, frame, obs, tramo: emitidos.append(e) or True)
+        hallados = rev.revisar({"desde": 0.0, "hasta": 9.0, "motivos": ["personas #1 y #2 juntas"]})
+        self.assertTrue(any(e.tipo == "hurto" and "arrebato" in e.mensaje for e in hallados), [e.mensaje for e in hallados])
+        self.assertEqual(rev.estado["hallazgos"], len(hallados))
+        self.assertEqual(len({e.tipo for e in emitidos}), len(emitidos))        # un aviso por tipo y tramo
+
+    def test_no_repite_lo_que_ya_se_reviso_y_une_pedidos(self):
+        rev = self._revisor(lambda *a: True)
+        rev.pedir(1.0, 4.0, "a")
+        rev.pedir(3.5, 7.0, "b")                                      # se superpone: un solo tramo
+        self.assertEqual(len(rev._pendientes), 1)
+        self.assertEqual((rev._pendientes[0]["desde"], rev._pendientes[0]["hasta"]), (1.0, 7.0))
+        rev.revisar(rev._pendientes.pop(0))
+        rev.pedir(2.0, 8.0, "c")                                      # solo queda por revisar de 7 a 8
+        self.assertEqual(rev._pendientes[0]["desde"], 7.0)
+        rev._pendientes.clear()
+        rev.pedir(2.0, 8.0, "operador", forzar=True)                  # el operador puede pedirlo de nuevo
+        self.assertEqual(rev._pendientes[0]["desde"], 2.0)
+
+    def test_alerta_de_la_revision_con_privacidad_y_sin_duplicar(self):
+        from vigia.servidor import Sistema
+        from vigia.tipos import Evento
+        with tempfile.TemporaryDirectory() as d:
+            cfg = copy.deepcopy(CFG)
+            cfg["camaras"] = []
+            s = Sistema(cfg, Path(d), demo=True)
+            t = s.trabajadores["demo"]
+            try:
+                import time as _t
+                ahora = _t.time()
+                obs = Observacion(t=ahora - 3, personas=[persona(1, esqueleto(400, 480, "quieto", 0, 0, 1, 0))])
+                frame = np.full((ALTO, ANCHO, 3), 90, np.uint8)
+                tramo = {"desde": ahora - 7, "hasta": ahora, "motivos": ["personas #1 y #2 juntas"]}
+                e = Evento("hurto", "alta", "Posible arrebato", "La mochila pasó de #1 a #2.", "arrebato:1")
+                self.assertTrue(t._emitir_revision(e, frame, obs, tramo))
+                alerta = s.alertas.listar(5)[0]
+                self.assertIn("segunda mirada", alerta["explicacion"])
+                e2 = Evento("hurto", "alta", "Posible arrebato", "otra vez", "arrebato:2")
+                self.assertFalse(t._emitir_revision(e2, frame, obs, tramo))   # ya se avisó: no se duplica
+                t._vivo_tipos["violencia"] = ahora - 1                        # la vista en vivo ya vio la pelea
+                e3 = Evento("violencia", "alta", "Pelea", "golpes", "violencia:1-2")
+                self.assertFalse(t._emitir_revision(e3, frame, obs, tramo))
+            finally:
+                for w in s.trabajadores.values():
+                    w.detener()
+                s.alertas.cerrar()
+
+
+class ChequeoPrevio(unittest.TestCase):
+    """Antes de la feria: ¿luz, distancia, cámara quieta, velocidad, objetos y zonas están bien?"""
+
+    def _sondeo(self, brillo=130, mover=0.0, personas=True, mochila=True, segundos=6):
+        from vigia.chequeo import Sondeo
+        from vigia.tipos import Objeto
+        s = Sondeo()
+        rng = np.random.default_rng(0)
+        import cv2
+        ruido = rng.integers(0, 255, (ALTO, ANCHO), dtype=np.uint8)
+        fondo = cv2.normalize(cv2.GaussianBlur(ruido, (0, 0), 6), None, 0, 255, cv2.NORM_MINMAX)   # textura de una sala
+        for k in range(segundos * 10):
+            t = k / 10
+            dx = int(mover * t)
+            gris = np.roll(fondo, dx, axis=1).astype(float) * brillo / 128
+            img = cv2_bgr(np.clip(gris, 0, 255).astype(np.uint8))
+            ps = [persona(1, esqueleto(400, 480, "quieto", t, 0, 1, 0))] if personas else []
+            objs = [Objeto(5, "mochila", np.array([380, 300, 420, 360]))] if mochila else []
+            s.actualizar(img, Observacion(t=t, personas=ps, objetos=objs), t)
+        return s
+
+    def test_todo_bien(self):
+        from vigia.chequeo import evaluar
+        zonas = [{"tipo": "restringida"}, {"tipo": "merodeo"}]
+        r = evaluar(self._sondeo(), 9.0, False, {"zonas": zonas, "vocabulario": True, "emociones": True,
+                                                 "aceleracion": {"personas": "openvino", "objetos": "openvino"}})
+        self.assertTrue(r["listo"], [p for p in r["puntos"] if p["estado"] != "ok"])
+
+    def test_detecta_los_problemas_tipicos(self):
+        from vigia.chequeo import evaluar
+        estados = lambda r: {p["nombre"]: p["estado"] for p in r["puntos"]}
+        r = evaluar(self._sondeo(brillo=30), 9.0, False, {})
+        self.assertEqual(estados(r)["Luz"], "mal")
+        self.assertFalse(r["listo"])
+        r = evaluar(self._sondeo(mover=40), 9.0, False, {})
+        self.assertEqual(estados(r)["Cámara quieta"], "mal")
+        r = evaluar(self._sondeo(personas=False, mochila=False), 9.0, False, {})
+        self.assertEqual(estados(r)["Distancia"], "pendiente")
+        self.assertEqual(estados(r)["Objetos"], "pendiente")
+        r = evaluar(self._sondeo(), 2.0, False, {})
+        self.assertEqual(estados(r)["Velocidad del análisis"], "mal")
+        r = evaluar(self._sondeo(), 2.0, True, {})                    # con segunda mirada: funciona, más tarde
+        self.assertEqual(estados(r)["Velocidad del análisis"], "aviso")
+
+    def test_ruta_del_trabajador(self):
+        from vigia.servidor import Sistema
+        with tempfile.TemporaryDirectory() as d:
+            cfg = copy.deepcopy(CFG)
+            cfg["camaras"] = []
+            s = Sistema(cfg, Path(d), demo=True)
+            try:
+                t = s.trabajadores["demo"]
+                self.assertTrue(VideoSubidoACompas._esperar(VideoSubidoACompas, lambda: len(t.sondeo.luz) >= 2))
+                r = t.chequeo()
+                self.assertEqual(r["id"], "demo")
+                self.assertIn("Luz", {p["nombre"] for p in r["puntos"]})
+            finally:
+                for w in s.trabajadores.values():
+                    w.detener()
+                s.alertas.cerrar()
+
+    def test_retos_de_arrebato_y_forcejeo(self):
+        from vigia.reto import POR_ID
+        self.assertIn("hurto", POR_ID["arrebato"]["tipos"])
+        self.assertEqual(POR_ID["forcejeo"]["tipos"], ["violencia"])
+
+
+def cv2_bgr(gris):
+    import cv2
+    return cv2.cvtColor(gris, cv2.COLOR_GRAY2BGR)
+
+
+class SegundaMiradaEnLaCamara(unittest.TestCase):
+    def test_la_vista_en_vivo_pide_revisar_cuando_dos_personas_se_juntan(self):
+        import time as _t
+        from vigia.revision import Memoria, Revisor
+        from vigia.servidor import Sistema
+
+        class LectorVivo:
+            finito, conectada, detallado = False, True, False
+
+            def __init__(self):
+                self.memoria = Memoria(10, 10, ANCHO)
+
+            def ultimo(self):
+                return np.zeros((ALTO, ANCHO, 3), np.uint8)
+
+            def detener(self):
+                pass
+
+        class Detector:
+            abierto, aceleracion, ms = True, {"personas": "cpu", "objetos": "cpu"}, {"personas": 1.0, "objetos": 1.0}
+
+            def procesar(self, frame, t):
+                return Observacion(t=t, personas=[persona(1, esqueleto(400, 480, "quieto", 0, 0, 1, 0)),
+                                                  persona(2, esqueleto(460, 480, "quieto", 0, 0, 1, 0))])
+
+        class SinRostros:
+            disponible = False
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = copy.deepcopy(CFG)
+            cfg["camaras"] = []
+            cfg["procesamiento"]["revision"] = {"solo_si_fps_menor_a": 1000}   # como si la PC fuera lenta
+            s = Sistema(cfg, Path(d), demo=True)
+            t = s.trabajadores["demo"]
+            try:
+                t._parar = True
+                t.demo, t.sim, t.lector, t.detector, t.rostros = False, None, LectorVivo(), Detector(), SinRostros()
+                t.revisor = Revisor(t.cfg, t.lector.memoria, Detector, t._emitir_revision)
+                t.revisor.detener()
+                for _ in range(4):
+                    t._paso()
+                    _t.sleep(0.02)
+                self.assertEqual(len(t.revisor._pendientes), 1)        # una sola revisión, no una por cuadro
+                self.assertIn("juntas", t.revisor._pendientes[0]["motivos"][0])
+                self.assertTrue(t.estado["revision"]["activa"])
+                self.assertTrue(t.revisar_ultimos(10))
+            finally:
+                if t.revisor:
+                    t.revisor.detener()
+                s.alertas.cerrar()

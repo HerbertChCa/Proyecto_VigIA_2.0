@@ -196,3 +196,23 @@ legend { color: var(--texto); padding: 0 6px; font-weight: 600; }
   .camara-cab h3 { flex: 1 0 auto; }
   .camara-cab .meta { order: 9; flex-basis: 100%; margin-left: 0; }
 }
+
+/* segunda mirada y chequeo previo */
+.camara-cab .revisar { background: none; border: 1px solid var(--borde); border-radius: 6px; color: #cdd3db; cursor: pointer;
+  font-size: 12px; padding: 4px 8px; white-space: nowrap; }
+.camara-cab .revisar:hover { border-color: var(--acento); }
+.video .segunda-mirada { position: absolute; top: 10px; right: 10px; padding: 4px 10px; border-radius: 6px;
+  background: rgba(20, 60, 90, .85); color: #fff; font-size: 12px; pointer-events: none; }
+.chequeo { margin: 12px 0 18px; }
+.chequeo h4 { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; font-size: 15px; }
+.chequeo-veredicto { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; }
+.chequeo-veredicto.ok { color: #3ecf8e; }
+.chequeo-veredicto.mal { color: #ef6b6b; }
+.chequeo-punto { display: flex; gap: 10px; padding: 7px 0; border-top: 1px solid var(--borde); font-size: 13px; line-height: 1.45; }
+.chequeo-icono { flex: 0 0 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-weight: 700;
+  font-size: 12px; border: 1px solid currentColor; }
+.chequeo-punto.ok .chequeo-icono { color: #3ecf8e; }
+.chequeo-punto.aviso .chequeo-icono { color: #e8b84a; }
+.chequeo-punto.mal .chequeo-icono { color: #ef6b6b; }
+.chequeo-punto.pendiente .chequeo-icono { color: var(--tenue); }
+.chequeo-consejo { color: var(--tenue); margin-top: 2px; }

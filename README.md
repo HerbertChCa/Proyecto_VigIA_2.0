@@ -120,6 +120,32 @@ En los videos subidos, el botón **Detallado / Tiempo real** de la tarjeta cambi
 real el video va a su velocidad y se comporta como una cámara en vivo (sirve para mostrar qué se perdería en vivo
 con esta PC); en detallado no se salta nada. Para la feria: `python -m vigia --feria --rapido`.
 
+## Preparar la feria paso a paso (para que no falle en vivo)
+
+**Segunda mirada.** Si la PC analiza pocos cuadros por segundo en vivo, VigIA guarda los últimos 15 s de la
+cámara. Cuando ve algo que podría ser un incidente rápido (dos personas juntas, un movimiento brusco, alguien que
+queda horizontal), vuelve a analizar ese tramo cuadro a cuadro, como un video en modo detallado, con un segundo
+analizador. Lo que encuentre y la vista en vivo no haya avisado llega como alerta unos segundos después, con la
+explicación «Detectado en la segunda mirada». En la tarjeta aparece «Segunda mirada: revisando… 40 %», y el botón
+**Revisar 10 s** la pide a mano. En los retos, antes de decir «no te detectó», VigIA revisa los últimos segundos
+del intento. Se ajusta en `config.yaml` (`procesamiento.revision`).
+
+**El día anterior**
+1. `python scripts\acelerar_modelos.py --rapido` (con internet) y `python scripts\medir_velocidad.py video.mp4 --rapido`.
+2. Grabe con el celular, en un lugar parecido, cada reto que mostrarán y páselo por
+   `python scripts\diagnosticar_video.py`: si alguno no da alerta, ahí se ve por qué.
+
+**Al llegar a la sala** (`python -m vigia --feria --rapido`, una sola cámara)
+1. Fije la cámara (trípode o apoyo), de lado a la zona de pruebas, sin ventanas detrás de las personas, a una
+   distancia en que se vea el cuerpo entero.
+2. Dibuje las zonas (botón **Zonas**): una restringida y una de merodeo, sobre el piso.
+3. Abra **Chequeo** y corrija lo que salga en rojo. Párense donde harán las pruebas, caminen, muestren la mochila
+   y simulen una caída hasta que todo quede en verde o amarillo.
+4. Haga cada reto una vez antes de abrir al público. Después pulse **Borrar historial**.
+
+**Durante la feria:** mire de vez en cuando la etiqueta de precisión de la tarjeta. Si alguien hizo el reto y no
+salió, **Revisar 10 s** lo vuelve a analizar cuadro a cuadro.
+
 ## Analizar un video sin tocar el código
 
 En el panel, **+ Cámara** tiene dos pestañas:
