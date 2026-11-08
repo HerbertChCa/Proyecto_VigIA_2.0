@@ -105,11 +105,13 @@ reglas:
     distancia_max: 1.2            # distancia entre personas (alturas)
     duracion_min: 0.6             # segundos sostenidos
     requiere_contacto: true       # una mano o un pie debe llegar al cuerpo de la otra persona
+    agitacion_lenta: 0.11         # PC lenta (< 5 c/s): alturas que cambian de lugar manos y codos (golpes que no se ven)
     forcejeo:                     # cuerpo a cuerpo con empujones o tirones, aunque no haya golpes rápidos
       activa: true
       duracion: 1.5               # segundos con los cuerpos juntos (70 % del tiempo o más)
       brazos: 1.0                 # alturas/s de muñecas o codos, o bien...
       empuje: 0.35                # ...alturas/s que un cuerpo se mueve contra el otro sin separarse
+      vaiven_lento: 0.04          # PC lenta: alturas de vaivén de un cuerpo respecto del otro
   caida:
     activa: true
     angulo_horizontal: 60         # grados del tronco respecto de la vertical
@@ -119,6 +121,7 @@ reglas:
     activa: true
     tiempo_max: 60                # segundos en una zona de merodeo
     sin_zonas: false              # si no hay zonas, medir en toda la cámara (genera muchas alertas en tiendas)
+    tolerancia_salida: 2          # segundos fuera de la zona que no reinician la cuenta (temblor, pies en el borde)
   intrusion:
     activa: true                  # se dispara al entrar en una zona "restringida"
   objetos:

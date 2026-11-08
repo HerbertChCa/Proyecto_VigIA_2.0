@@ -31,12 +31,14 @@ import numpy as np
 
 from .historial import Historial
 from .objetos import FiltroObjetos
-from .reglas import PORTATILES, Reglas, alto_estimado, cuerpos_juntos, sostiene
+from .reglas import ARMAS, PORTATILES, VEHICULOS, Reglas, alto_estimado, cuerpos_juntos, solape, sostiene, \
+    velocidad_cuerpo
 
 log = logging.getLogger("vigia.revision")
 
 # situaciones rápidas: las que la vista en vivo puede perder entre dos cuadros
-REVISABLES = {"violencia", "caida", "en_suelo", "hurto", "robo_huida", "arma"}
+REVISABLES = {"violencia", "caida", "en_suelo", "hurto", "robo_huida", "arma", "robo_vehiculo", "vandalismo",
+              "estampida"}
 
 REVISION = {
     "activa": True,
@@ -101,9 +103,20 @@ def sospecha(obs, reglas: Reglas, cfg: dict) -> Optional[str]:
             if cuerpos_juntos(a, b) or float(np.linalg.norm(ca - cb)) / max(alto, 1.0) <= cfg["distancia_sospecha"]:
                 return f"personas #{a.id} y #{b.id} juntas"
     umbral = reglas.cfg.get("violencia", {}).get("velocidad_extremidades", 1.8)
-    for pid, (_, v) in getattr(reglas, "_rap", {}).items():
-        if v >= 0.6 * umbral:
+    for pid, (dur, v) in getattr(reglas, "_rap", {}).items():
+        if v >= 0.6 * umbral or dur > 0:
             return f"movimiento brusco de la persona #{pid}"
+    hist = getattr(reglas, "_hist", None)
+    if hist is not None:
+        corre = [p.id for p in personas if p.id in hist.personas
+                 and velocidad_cuerpo(hist.personas[p.id], obs.t) >= 0.7 * reglas.cfg.get("huida", {}).get("velocidad", 1.6)]
+        if corre:
+            return f"persona #{corre[0]} corriendo"
+    for o in obs.objetos:
+        if o.clase in ARMAS:
+            return f"posible {o.clase} a la vista"
+        if o.clase in VEHICULOS and any(solape(p.caja, o.caja) >= 0.15 for p in personas):
+            return f"persona junto a un vehículo ({o.clase})"
     for p in personas:
         w, h = p.caja[2] - p.caja[0], p.caja[3] - p.caja[1]
         if w > 1.1 * h:

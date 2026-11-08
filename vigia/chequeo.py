@@ -173,7 +173,8 @@ def evaluar(s: Sondeo, fps: float, revision: bool, contexto: dict) -> dict:
     # 8. zonas, modelos y emociones
     zonas = contexto.get("zonas") or []
     tipos = {z.get("tipo") for z in zonas}
-    falta = [n for n, t in (("restringida (intrusión)", "restringida"), ("de merodeo", "merodeo")) if t not in tipos]
+    falta = [n for n, t in (("restringida (intrusión)", "restringida"), ("de merodeo", "merodeo"),
+                            ("protegida (vandalismo)", "protegida")) if t not in tipos]
     puntos.append(_punto("Zonas", "ok" if not falta else "aviso",
                          f"{len(zonas)} zona(s) dibujada(s)." + (f" Falta una zona {' y una '.join(falta)}." if falta else ""),
                          "" if not falta else "Botón «Zonas»: dibuje sobre el piso las zonas de los retos."))

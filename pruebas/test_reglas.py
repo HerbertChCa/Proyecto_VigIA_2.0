@@ -2054,3 +2054,92 @@ class SegundaMiradaEnLaCamara(unittest.TestCase):
                 if t.revisor:
                     t.revisor.detener()
                 s.alertas.cerrar()
+
+
+class CondicionesReales(unittest.TestCase):
+    """Cada situación que VigIA debe detectar, en las condiciones de una prueba en vivo (pruebas/estres.py):
+    PC lenta, números de seguimiento que cambian, pies tapados, ruido, detecciones perdidas y cámara en la mano.
+    Y las situaciones normales que, en esas mismas condiciones, NO deben dar alerta."""
+
+    def test_se_detecta_en_todas_las_condiciones(self):
+        import estres
+        r = estres.tabla()
+        fallas = [f"{s} con {c}" for (s, c), ok in r.items() if not ok]
+        self.assertEqual(fallas, [])
+
+    def test_sin_falsas_alarmas_en_esas_condiciones(self):
+        import estres
+        f = estres.falsas()
+        self.assertEqual({k: v for k, v in f.items() if v}, {})
+
+
+class ContinuidadDePersonas(unittest.TestCase):
+    def _obs(self, t, pid, x, y=480):
+        return Observacion(t=t, personas=[persona(pid, esqueleto(x, y, "quieto", t, 0, 1, 0))])
+
+    def test_el_numero_nuevo_en_el_mismo_lugar_es_la_misma_persona(self):
+        h = Historial()
+        for k in range(20):
+            h.actualizar(self._obs(k / 10, 7, 400))
+        o = self._obs(2.1, 31, 404)                       # el seguidor la perdió un instante y le dio otro número
+        h.actualizar(o)
+        self.assertEqual(o.personas[0].id, 7)
+        self.assertEqual(h.personas[7].primera_vez, 0.0)   # conserva su historia (merodeo, caída, dueño)
+        o = self._obs(2.2, 31, 405)
+        h.actualizar(o)
+        self.assertEqual(o.personas[0].id, 7)             # y se sigue usando el número viejo
+
+    def test_quien_entra_por_donde_otro_sale_es_otra_persona(self):
+        h = Historial()
+        for k in range(20):
+            x = 300 + k * 10                               # camina hacia la derecha y sale
+            h.actualizar(Observacion(t=k / 10, personas=[persona(1, esqueleto(x, 480, "camina", k / 10, x, 1, 0))]))
+        o = Observacion(t=2.0, personas=[persona(2, esqueleto(620, 480, "camina", 2.0, 620, -1, 0))])
+        h.actualizar(o)                                    # entra otra persona, más adelante, en sentido contrario
+        self.assertEqual(o.personas[0].id, 2)
+
+    def test_no_se_une_con_alguien_que_sigue_en_la_imagen(self):
+        h = Historial()
+        for k in range(10):
+            h.actualizar(self._obs(k / 10, 1, 400))
+        o = Observacion(t=1.0, personas=[persona(1, esqueleto(400, 480, "quieto", 1, 0, 1, 0)),
+                                         persona(9, esqueleto(420, 480, "quieto", 1, 0, 1, 0))])
+        h.actualizar(o)
+        self.assertEqual(sorted(p.id for p in o.personas), [1, 9])
+
+
+class ReglasEnPcLenta(unittest.TestCase):
+    def test_la_explicacion_dice_como_se_midio(self):
+        import estres
+        ev = estres.correr(lambda: estres.golpes, 4, (), estres.Lenta(0.7), copy.deepcopy(CFG["reglas"]))
+        v = [e for e in ev if e.tipo == "violencia"]
+        self.assertTrue(v)
+        self.assertIn("cambian de lugar", v[0].explicacion)
+
+    def test_salir_un_instante_no_reinicia_el_merodeo(self):
+        from vigia.simulador import H
+        zona = {"id": "m", "nombre": "Entrada", "tipo": "merodeo", "puntos": [[0.2, 0.6], [0.6, 0.6], [0.6, 0.99], [0.2, 0.99]]}
+        cfg = copy.deepcopy(CFG["reglas"])
+        cfg["merodeo"]["tiempo_max"] = 10
+
+        def cuadros(t):
+            y = 480 if int(t * 10) % 40 else ALTO * 0.55       # cada 4 s, los pies «salen» un cuadro (temblor)
+            return [persona(1, esqueleto(400, y, "quieto", t, 0, 1, 0))], []
+        reglas, hist, ev, t = Reglas(cfg), Historial(), [], 0.0
+        while t < 12:
+            ps, objs = cuadros(t)
+            obs = Observacion(t=t, personas=ps, objetos=objs)
+            hist.actualizar(obs)
+            ev += reglas.evaluar(obs, hist, ANCHO, ALTO, [zona])
+            t += 0.1
+        self.assertIn("merodeo", {e.tipo for e in ev})
+
+    def test_pies_tapados_por_una_mesa(self):
+        from vigia.reglas import pies_de
+        p = persona(1, esqueleto(400, 480, "quieto", 0, 0, 1, 0))
+        c = p.conf_puntos.copy()
+        c[13:17] = 0.0
+        tapada = Persona(1, np.array([p.caja[0], p.caja[1], p.caja[2], p.caja[1] + 0.6 * (p.caja[3] - p.caja[1])]),
+                         p.puntos, c)
+        self.assertGreater(pies_de(tapada)[1], tapada.caja[3] + 0.2 * (p.caja[3] - p.caja[1]))   # el piso, no la mesa
+        self.assertAlmostEqual(pies_de(p)[1], p.caja[3], delta=12)

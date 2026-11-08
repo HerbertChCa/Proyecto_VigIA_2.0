@@ -303,6 +303,30 @@ precisión con los veredictos, que se detecten el robo con huida, el vandalismo,
 aglomeración y la huida masiva (y no sus casos parecidos: irse caminando, golpear con otra persona cerca, un
 cuchillo sobre una mesa), que las zonas respeten su horario, que el AUC del script de evaluación sea correcto y que el aviso declare la finalidad.
 
+**Banco de condiciones reales** (`python pruebas/estres.py`). Pasa las 15 situaciones que VigIA detecta (merodeo,
+intrusión, pelea, forcejeo, caída, persona en el suelo, abandono, hurto del piso, arrebato, robo con huida, robo de
+vehículo, vandalismo, arma, aglomeración y huida masiva) por las condiciones que hicieron fallar las pruebas en
+clase: PC lenta (2.5 y 1.4 cuadros por segundo), el seguidor que le cambia el número a las personas, pies tapados
+por una mesa, ruido en los puntos del esqueleto, detecciones perdidas y cámara en la mano. También pasa 8
+situaciones normales (cruzarse, abrazarse, caminar juntos, conversar con gestos, esperar con la mochila puesta, el
+dueño que recoge su mochila, pasar por una zona, un grupo caminando) que no deben dar alerta. Imprime una tabla;
+las pruebas exigen que todo se detecte y que no haya falsas alarmas. Lo que hace que resista esas condiciones:
+
+- **Continuidad de personas:** si el seguidor le da otro número a alguien que se perdió un instante en el mismo
+  lugar (o donde debía estar según cómo se movía), se le devuelve el anterior. El merodeo no vuelve a contar de
+  cero, una caída conserva el «antes» y un arrebato, al dueño. Quien entra por donde otro sale sigue siendo otra
+  persona.
+- **PC lenta:** con menos de 5 cuadros por segundo la velocidad de un golpe no se puede medir; la pelea, el
+  forcejeo y el vandalismo se reconocen por cuánto cambian de lugar los brazos y los cuerpos (la explicación de
+  la alerta lo dice). Las ventanas de tiempo del arrebato se alargan para tener al menos dos cuadros.
+- **Pies tapados:** el piso se estima con la estatura (zonas, robo de vehículo) y las velocidades se miden en
+  estaturas estimadas con el esqueleto, no con la caja recortada.
+- **Cámara en la mano:** la quietud de un objeto se mide con posiciones promedio y un sacudón breve no cuenta;
+  salir de una zona menos de 2 s no reinicia el merodeo.
+- **Detecciones perdidas:** la aglomeración cuenta a las personas vistas en el último segundo.
+- **Sin falsas alarmas nuevas:** caminar juntos ya no se toma como forcejeo (los dos avanzan a la par) y una
+  mochila puesta o en la mano de alguien que espera no es un objeto «quieto».
+
 ## Estructura
 
 ```

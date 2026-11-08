@@ -68,6 +68,48 @@ def velocidades_extremidades(p: Pista, t: float, ventana: float, alto: float) ->
     return out
 
 
+def paso_muestras(muestras) -> float:
+    """Segundos típicos entre dos cuadros analizados (0.1 a 10 c/s; 0.7 en una PC que da 1.4 c/s)."""
+    ts = [m.t for m in muestras]
+    return float(np.median(np.diff(ts))) if len(ts) > 1 else 0.1
+
+
+def agitacion(p: Pista, t: float, ventana: float = 1.5, puntos=None) -> float:
+    """Cuánto se mueven las manos y los codos respecto del torso (desvío de su posición, en alturas). Con pocos
+    cuadros por segundo la velocidad no se puede medir (un golpe dura menos que el hueco entre dos cuadros), pero
+    un brazo que golpea o forcejea aparece cada vez en un lugar distinto; uno que acompaña la marcha, casi en el mismo."""
+    puntos = puntos or (MUNECA_I, MUNECA_D, CODO_I, CODO_D)
+    v = [m for m in p.ventana(t, ventana) if m.puntos is not None]
+    if len(v) < 3:
+        return 0.0
+    alto = p.alto_de_pie(t)
+    mejor = 0.0
+    for k in puntos:
+        rel = [m.puntos[k] - _torso(m) for m in v if m.conf_puntos is None or m.conf_puntos[k] >= 0.3]
+        if len(rel) >= 3:
+            mejor = max(mejor, float(np.std(np.array(rel), axis=0).max()) / alto)
+    return mejor
+
+
+def pies_de(p) -> np.ndarray:
+    """Dónde pisa la persona. Si una mesa o el borde de la imagen tapa las piernas, la caja termina en la cintura:
+    se estima el piso con la estatura (las zonas se dibujan sobre el piso)."""
+    tobillos = [q for q in (p.punto(TOBILLO_I), p.punto(TOBILLO_D)) if q is not None]
+    if len(tobillos) == 2:
+        return np.array([(p.caja[0] + p.caja[2]) / 2, max(float(np.mean([q[1] for q in tobillos])), p.caja[3])])
+    if p.alto - (p.caja[3] - p.caja[1]) > 0.15 * p.alto and p.punto(NARIZ) is not None:
+        return np.array([(p.caja[0] + p.caja[2]) / 2, p.caja[1] + p.alto])
+    return p.pies
+
+
+def caja_completa(p) -> np.ndarray:
+    """Caja de la persona entera aunque se vea solo de la cintura para arriba."""
+    c = np.asarray(p.caja, float).copy()
+    if p.alto - (c[3] - c[1]) > 0.15 * p.alto and p.punto(NARIZ) is not None:
+        c[3] = c[1] + p.alto
+    return c
+
+
 def zona_cuerpo(persona, margen: float = 0.12):
     """Rectángulo del tronco y la cabeza (nariz, hombros y caderas) ampliado; sin pose, la caja entera."""
     if persona.puntos is not None:
@@ -307,6 +349,7 @@ class Reglas:
         r = self.cfg
         if self._t0 is None:
             self._t0 = obs.t
+        self._hist = hist                      # para la segunda mirada (vigia/revision.py: sospecha)
         self._rap = self._rapidez(obs, hist)
         self._registrar_contactos(obs, hist)
         if r["violencia"]["activa"]:
@@ -346,6 +389,14 @@ class Reglas:
             paso = float(np.median(np.diff([ti for ti, _ in vel]))) if len(vel) > 1 else 0.125
             dur = paso * sum(1 for _, v in vel if v >= umbral)
             pista.estado["vel_max"] = max((v for _, v in vel), default=0.0)
+            pista.estado.pop("agitacion", None)
+            if paso >= 0.2:
+                # PC lenta (menos de 5 c/s): un golpe cae entre dos cuadros y su velocidad no se ve. Se mide en
+                # cambio cuánto cambian de lugar las manos y codos respecto del torso en 1.5 s.
+                ag = agitacion(pista, obs.t, max(1.5, 3.5 * paso))
+                if ag >= self.cfg["violencia"].get("agitacion_lenta", 0.11):
+                    pista.estado["agitacion"] = ag
+                    dur = max(dur, self.cfg["violencia"]["duracion_min"])
             out[p.id] = (dur, pista.estado["vel_max"])
         return out
 
@@ -377,7 +428,7 @@ class Reglas:
         for k in [k for k, tc in self._ultimo_toque.items() if t - tc > 10]:
             del self._ultimo_toque[k]
         for k in list(self._juntos):
-            self._juntos[k] = [m for m in self._juntos[k] if t - m[0] <= 3.0]
+            self._juntos[k] = [m for m in self._juntos[k] if t - m[0] <= 4.0]
             if not self._juntos[k]:
                 del self._juntos[k]
 
@@ -387,16 +438,18 @@ class Reglas:
         f = {**FORCEJEO, **self.cfg["violencia"].get("forcejeo", {})}
         if not f["activa"]:
             return None
-        muestras = [m for m in self._juntos.get((min(a, b), max(a, b)), []) if t - m[0] <= f["duracion"]]
-        if len(muestras) < 3 or t - muestras[0][0] < 0.8 * f["duracion"]:
+        paso = paso_muestras(pistas[a].ventana(t, 3.0))
+        duracion = max(f["duracion"], 3.5 * paso)            # con pocos cuadros por segundo, una ventana más larga
+        muestras = [m for m in self._juntos.get((min(a, b), max(a, b)), []) if t - m[0] <= duracion]
+        if len(muestras) < 3 or t - muestras[0][0] < 0.8 * duracion - 0.5 * paso:
             return None
         juntos = sum(1 for _, j in muestras if j) / len(muestras)
         if juntos < 0.7:
             return None
         # posición de una persona respecto de la otra, cuadro a cuadro: en un forcejeo va y viene (empujones,
         # tirones) pero no se aleja; dos personas que se cruzan caminando también se tapan, pero pasan de largo
-        pa = {round(m.t, 3): _torso(m) for m in pistas[a].ventana(t, f["duracion"])}
-        pb = {round(m.t, 3): _torso(m) for m in pistas[b].ventana(t, f["duracion"])}
+        pa = {round(m.t, 3): _torso(m) for m in pistas[a].ventana(t, duracion)}
+        pb = {round(m.t, 3): _torso(m) for m in pistas[b].ventana(t, duracion)}
         comunes = sorted(set(pa) & set(pb))
         if len(comunes) < 3:
             return None
@@ -406,8 +459,25 @@ class Reglas:
         neto = float(np.linalg.norm(rel[-1] - rel[0]))
         if neto > 0.5 or neto > 0.6 * recorrido:
             return None                                        # pasaron de largo o se separaron
+        # caminando juntos (de la mano, abrazados, uno al lado del otro) los cuerpos se tapan y no se separan, y los
+        # brazos se balancean rápido; pero los dos avanzan a la par. En un forcejeo se quedan casi en el mismo lugar.
+        comun = (self._vel_vector(pistas[a], t, duracion) + self._vel_vector(pistas[b], t, duracion)) / 2
+        if float(np.linalg.norm(comun)) >= 0.35:
+            return None
         empuje = recorrido / max(comunes[-1] - comunes[0], 1e-6)
         brazos = max(self._rapidez_brazos(pistas[a], t), self._rapidez_brazos(pistas[b], t))
+        if paso >= 0.2:
+            # PC lenta: el vaivén de un empujón dura menos que el hueco entre cuadros y la velocidad sale baja.
+            # Se mide cuánto cambia de lugar un cuerpo respecto del otro y los brazos respecto de su torso.
+            vaiven = float(np.std(np.array(rel), axis=0).max())
+            ag = max(agitacion(pistas[a], t, duracion), agitacion(pistas[b], t, duracion))
+            if vaiven < f.get("vaiven_lento", 0.04) and ag < self.cfg["violencia"].get("agitacion_lenta", 0.11):
+                return None
+            return (f"Cuerpo a cuerpo durante {t - muestras[0][0]:.1f} s ({juntos:.0%} del tiempo), sin separarse, con "
+                    f"un vaivén de {vaiven:.2f} alturas entre ambos cuerpos y brazos que cambian de lugar {ag:.2f} "
+                    f"alturas (umbrales {f.get('vaiven_lento', 0.04)} y "
+                    f"{self.cfg['violencia'].get('agitacion_lenta', 0.11)}; medido con {1 / paso:.1f} cuadros por "
+                    "segundo, sin velocidades).")
         if brazos < f["brazos"] and empuje < f["empuje"]:
             return None                                        # juntos y quietos: un abrazo, una conversación
         return (f"Cuerpo a cuerpo durante {t - muestras[0][0]:.1f} s ({juntos:.0%} del tiempo) con movimiento brusco: "
@@ -461,10 +531,15 @@ class Reglas:
                 golpes = dur >= c["duracion_min"] and (not c.get("requiere_contacto", True) or
                                                       contacto(pistas[a], pb, t) or contacto(pistas[b], pa, t))
                 if golpes:
+                    ag = max(pistas[a].estado.get("agitacion", 0.0), pistas[b].estado.get("agitacion", 0.0))
+                    medida = (f"Brazos que cambian de lugar {ag:.2f} alturas respecto del torso (umbral "
+                              f"{c.get('agitacion_lenta', 0.11)}; con pocos cuadros por segundo no se puede medir la "
+                              "velocidad de cada golpe)" if ag and vmax < c["velocidad_extremidades"] else
+                              f"Extremidades a {vmax:.1f} alturas/s (umbral {c['velocidad_extremidades']}) durante "
+                              f"{dur:.1f} s")
                     eventos.append(Evento(
                         "violencia", "alta", f"Posible pelea entre las personas #{a} y #{b}",
-                        f"Extremidades a {vmax:.1f} alturas/s (umbral {c['velocidad_extremidades']}) durante "
-                        f"{dur:.1f} s, con {dist:.2f} alturas de separación y contacto de una mano o un pie "
+                        f"{medida}, con {dist:.2f} alturas de separación y contacto de una mano o un pie "
                         "con el tronco o la cabeza de la otra persona.",
                         f"violencia:{a}-{b}", [pa.caja.tolist(), pb.caja.tolist()]))
                     continue
@@ -553,13 +628,21 @@ class Reglas:
             pista = hist.personas.get(p.id)
             if pista is None:
                 continue
-            fx, fy = p.pies[0] / ancho, p.pies[1] / alto
+            pies = pies_de(p)
+            fx, fy = pies[0] / ancho, pies[1] / alto
             desde = pista.estado.setdefault("zona_desde", {})
+            fuera = pista.estado.setdefault("zona_fuera", {})
+            tolerancia = c["merodeo"].get("tolerancia_salida", 2.0)
             for z in zonas:
                 dentro = punto_en_poligono(fx, fy, z["puntos"])
                 if not dentro:
+                    # salir un instante (la cámara tiembla, los pies pisan el borde) no reinicia el merodeo
+                    if z["id"] in desde and t - fuera.setdefault(z["id"], t) < tolerancia:
+                        continue
                     desde.pop(z["id"], None)
+                    fuera.pop(z["id"], None)
                     continue
+                fuera.pop(z["id"], None)
                 desde.setdefault(z["id"], t)
                 if z.get("tipo") == "restringida" and c["intrusion"]["activa"]:
                     out.append(Evento(
@@ -658,6 +741,19 @@ class Reglas:
                 return True
         return False
 
+    @staticmethod
+    def _encima_de(per, o) -> bool:
+        """¿La persona lleva el objeto puesto o agarrado (no apoyado en el piso a sus pies)?"""
+        pies = pies_de(per)
+        if fraccion_dentro(o.caja, per.caja) >= 0.6 and o.caja[3] < pies[1] - 0.2 * per.alto:
+            return True                                   # a la espalda, colgado del hombro, abrazado
+        for k in (MUNECA_I, MUNECA_D):
+            q = per.punto(k)
+            if q is not None and o.caja[0] - 0.05 * per.alto <= q[0] <= o.caja[2] + 0.05 * per.alto \
+                    and o.caja[1] - 0.05 * per.alto <= q[1] <= o.caja[3] + 0.05 * per.alto:
+                return True                               # la mano dentro del objeto: lo tiene agarrado
+        return False
+
     def _objetos(self, obs, hist) -> list[Evento]:
         c = self.cfg["objetos"]
         t = obs.t
@@ -693,9 +789,21 @@ class Reglas:
             if est["origen"] == "escenario":
                 self._recordar_escenario(o.caja)
                 continue
-            ultimos = pista.ventana(t, 1.5)
-            mov = float(np.linalg.norm(ultimos[-1].caja[:2] - ultimos[0].caja[:2])) if len(ultimos) > 1 else 0.0
+            ultimos = pista.ventana(t, max(1.5, 2.5 * paso_muestras(pista.muestras)))
+            # se compara la posición media de la primera y la segunda mitad de la ventana: el temblor de una cámara
+            # en la mano mueve la caja unos píxeles en cada cuadro, pero en promedio queda en el mismo lugar
+            if len(ultimos) > 1:
+                mitad = len(ultimos) // 2
+                c0 = np.mean([(m.caja[:2] + m.caja[2:]) / 2 for m in ultimos[:mitad]], axis=0)
+                c1 = np.mean([(m.caja[:2] + m.caja[2:]) / 2 for m in ultimos[mitad:]], axis=0)
+                mov = float(np.linalg.norm(c1 - c0))
+            else:
+                mov = 0.0
             quieto = mov < 0.35 * diag
+            if quieto:
+                est.pop("mov_desde", None)
+            elif mov < 1.0 * diag and t - est.setdefault("mov_desde", t) < 1.0:
+                quieto = True            # un sacudón breve (cámara en la mano) no es que alguien lo movió
 
             def cercania(per):
                 return float(np.linalg.norm(per.centro - o.centro)) / per.alto
@@ -713,8 +821,15 @@ class Reglas:
                     est["origen"] = "escenario"            # apareció sin nadie cerca: no lo trajo nadie
                     self._recordar_escenario(o.caja)
                     continue
+            # una mochila a la espalda o en la mano de alguien que está parado también está «quieta», pero no la
+            # dejaron: no cuenta para abandono ni para el hurto «del piso» (de eso se encarga la regla de arrebato)
+            if quieto and any(self._encima_de(per, o) for per in obs.personas):
+                est.pop("quieto_desde", None)
+                est.pop("solo_desde", None)
+                continue
             if quieto:
-                est.setdefault("quieto_desde", t)
+                # estuvo quieto toda la ventana que se acaba de medir, no recién ahora
+                est.setdefault("quieto_desde", ultimos[0].t if len(ultimos) > 1 else t)
                 tiempo_quieto = t - est["quieto_desde"]
                 if tiempo_quieto >= 3:
                     est["estuvo_quieto"] = True
@@ -796,8 +911,12 @@ class Reglas:
             if rec["avisado"] or rec["dueno"] is None:
                 continue
             a = rec["dueno"]
-            ultimos = [(tm, q) for tm, q in rec["muestras"] if rec["ult"] - tm <= c["cambio_min"]]
-            if not ultimos or rec["ult"] - ultimos[0][0] < 0.6 * c["cambio_min"]:
+            # con pocos cuadros por segundo, «lo tiene el otro desde hace 0.6 s» puede ser un solo cuadro:
+            # la ventana se alarga para que haya al menos dos
+            paso = float(np.median(np.diff([tm for tm, _ in rec["muestras"]]))) if len(rec["muestras"]) > 1 else 0.1
+            cambio = max(c["cambio_min"], 1.5 * paso)
+            ultimos = [(tm, q) for tm, q in rec["muestras"] if rec["ult"] - tm <= cambio]
+            if not ultimos or rec["ult"] - ultimos[0][0] < 0.6 * cambio:
                 continue
             otros = [q for _, q in ultimos if q and a not in q]
             if len(otros) < 0.8 * len(ultimos):
@@ -805,7 +924,7 @@ class Reglas:
             b = otros[-1][0]
             # pasó directo de las manos (o la espalda) del dueño a las de otro: no lo recogió del piso horas después
             con_dueno = [tm for tm, q in rec["muestras"] if a in q]
-            if not con_dueno or ultimos[0][0] - con_dueno[-1] > 2.0:
+            if not con_dueno or ultimos[0][0] - con_dueno[-1] > max(2.0, 3 * paso):
                 continue
             pa, pb = personas.get(a), personas.get(b)
             if pb is None and b in hist.personas and t - hist.personas[b].ultima_vez <= 1.0:
@@ -851,7 +970,7 @@ class Reglas:
             if cerca:
                 q = min(cerca, key=lambda x: np.linalg.norm(x["centro"] - o.centro))
             else:
-                encima = [p for p in obs.personas if solape(p.caja, o.caja) >= c["solape_min"]]
+                encima = [p for p in obs.personas if solape(caja_completa(p), o.caja) >= c["solape_min"]]
                 q = {"clase": o.clase, "centro": o.centro.copy(), "diag": diag, "desde": t, "ult": t,
                      "dueno": encima[0].id if encima else None, "toques": {}}
                 self._puestos.append(q)
@@ -859,7 +978,7 @@ class Reglas:
             q["ult"] = t
             estacionado = t - q["desde"]
             movido = float(np.linalg.norm(o.centro - q["centro"])) / q["diag"]
-            encima = {p.id: p for p in obs.personas if solape(p.caja, o.caja) >= c["solape_min"]}
+            encima = {p.id: p for p in obs.personas if solape(caja_completa(p), o.caja) >= c["solape_min"]}
             for pid in list(q["toques"]):
                 if pid not in encima:
                     del q["toques"][pid]
@@ -990,8 +1109,10 @@ class Reglas:
         c = self.cfg["aglomeracion"]
         t = obs.t
         out = []
-        n = len(obs.personas)
+        # personas vistas en el último segundo: en una multitud el detector pierde a varias en cada cuadro
+        n = max(len(obs.personas), sum(1 for q in hist.personas.values() if t - q.ultima_vez <= 1.0))
         if n >= c["max_personas"]:
+            self._multitud_bajo = None
             if self._multitud_desde is None:
                 self._multitud_desde = t
             if t - self._multitud_desde >= c["duracion"]:
@@ -999,8 +1120,12 @@ class Reglas:
                     "aglomeracion", "media", f"Aglomeración: {n} personas en la cámara",
                     f"Hay {n} personas o más (límite {c['max_personas']}) desde hace {t - self._multitud_desde:.0f} s.",
                     "aglomeracion"))
-        else:
-            self._multitud_desde = None
+        elif self._multitud_desde is not None:
+            # unos cuadros con menos personas (tapadas, perdidas) no cortan la aglomeración: 2 s seguidos sí
+            if getattr(self, "_multitud_bajo", None) is None:
+                self._multitud_bajo = t
+            if t - self._multitud_bajo >= 2.0:
+                self._multitud_desde = self._multitud_bajo = None
         vel_huida = self.cfg.get("huida", {}).get("velocidad", 1.6)
         corriendo = [p for p in obs.personas if p.id in hist.personas
                      and velocidad_cuerpo(hist.personas[p.id], t) >= vel_huida]

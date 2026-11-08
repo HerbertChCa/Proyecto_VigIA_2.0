@@ -1,0 +1,1016 @@
+diff --git a/README.md b/README.md
+index f6645f6..1215645 100644
+--- a/README.md
++++ b/README.md
+@@ -303,6 +303,30 @@ precisión con los veredictos, que se detecten el robo con huida, el vandalismo,
+ aglomeración y la huida masiva (y no sus casos parecidos: irse caminando, golpear con otra persona cerca, un
+ cuchillo sobre una mesa), que las zonas respeten su horario, que el AUC del script de evaluación sea correcto y que el aviso declare la finalidad.
+ 
++**Banco de condiciones reales** (`python pruebas/estres.py`). Pasa las 15 situaciones que VigIA detecta (merodeo,
++intrusión, pelea, forcejeo, caída, persona en el suelo, abandono, hurto del piso, arrebato, robo con huida, robo de
++vehículo, vandalismo, arma, aglomeración y huida masiva) por las condiciones que hicieron fallar las pruebas en
++clase: PC lenta (2.5 y 1.4 cuadros por segundo), el seguidor que le cambia el número a las personas, pies tapados
++por una mesa, ruido en los puntos del esqueleto, detecciones perdidas y cámara en la mano. También pasa 8
++situaciones normales (cruzarse, abrazarse, caminar juntos, conversar con gestos, esperar con la mochila puesta, el
++dueño que recoge su mochila, pasar por una zona, un grupo caminando) que no deben dar alerta. Imprime una tabla;
++las pruebas exigen que todo se detecte y que no haya falsas alarmas. Lo que hace que resista esas condiciones:
++
++- **Continuidad de personas:** si el seguidor le da otro número a alguien que se perdió un instante en el mismo
++  lugar (o donde debía estar según cómo se movía), se le devuelve el anterior. El merodeo no vuelve a contar de
++  cero, una caída conserva el «antes» y un arrebato, al dueño. Quien entra por donde otro sale sigue siendo otra
++  persona.
++- **PC lenta:** con menos de 5 cuadros por segundo la velocidad de un golpe no se puede medir; la pelea, el
++  forcejeo y el vandalismo se reconocen por cuánto cambian de lugar los brazos y los cuerpos (la explicación de
++  la alerta lo dice). Las ventanas de tiempo del arrebato se alargan para tener al menos dos cuadros.
++- **Pies tapados:** el piso se estima con la estatura (zonas, robo de vehículo) y las velocidades se miden en
++  estaturas estimadas con el esqueleto, no con la caja recortada.
++- **Cámara en la mano:** la quietud de un objeto se mide con posiciones promedio y un sacudón breve no cuenta;
++  salir de una zona menos de 2 s no reinicia el merodeo.
++- **Detecciones perdidas:** la aglomeración cuenta a las personas vistas en el último segundo.
++- **Sin falsas alarmas nuevas:** caminar juntos ya no se toma como forcejeo (los dos avanzan a la par) y una
++  mochila puesta o en la mano de alguien que espera no es un objeto «quieto».
++
+ ## Estructura
+ 
+ ```
+diff --git a/config.yaml b/config.yaml
+index db4fb1f..62812c6 100644
+--- a/config.yaml
++++ b/config.yaml
+@@ -99,11 +99,13 @@ reglas:
+     distancia_max: 1.2            # distancia entre personas (alturas)
+     duracion_min: 0.6             # segundos sostenidos
+     requiere_contacto: true       # una mano o un pie debe llegar al cuerpo de la otra persona
++    agitacion_lenta: 0.11         # PC lenta (< 5 c/s): alturas que cambian de lugar manos y codos (golpes que no se ven)
+     forcejeo:                     # cuerpo a cuerpo con empujones o tirones, aunque no haya golpes rápidos
+       activa: true
+       duracion: 1.5               # segundos con los cuerpos juntos (70 % del tiempo o más)
+       brazos: 1.0                 # alturas/s de muñecas o codos, o bien...
+       empuje: 0.35                # ...alturas/s que un cuerpo se mueve contra el otro sin separarse
++      vaiven_lento: 0.04          # PC lenta: alturas de vaivén de un cuerpo respecto del otro
+   caida:
+     activa: true
+     angulo_horizontal: 60         # grados del tronco respecto de la vertical
+@@ -113,6 +115,7 @@ reglas:
+     activa: true
+     tiempo_max: 60                # segundos en una zona de merodeo
+     sin_zonas: false              # si no hay zonas, medir en toda la cámara (genera muchas alertas en tiendas)
++    tolerancia_salida: 2          # segundos fuera de la zona que no reinician la cuenta (temblor, pies en el borde)
+   intrusion:
+     activa: true                  # se dispara al entrar en una zona "restringida"
+   objetos:
+diff --git a/pruebas/estres.py b/pruebas/estres.py
+new file mode 100644
+index 0000000..d198e57
+--- /dev/null
++++ b/pruebas/estres.py
+@@ -0,0 +1,331 @@
++"""Banco de estrés: cada situación que VigIA debe detectar, pasada por las condiciones reales de una prueba en
++vivo (PC lenta, números de seguimiento que cambian, pies tapados, puntos con ruido, detecciones perdidas, cámara
++temblorosa). Sirve para saber qué regla falla y con qué, antes de que pase en la feria.
++
++  python pruebas/estres.py            imprime la tabla
++"""
++from __future__ import annotations
++
++import copy
++import math
++import sys
++from pathlib import Path
++
++import numpy as np
++
++RAIZ = Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(RAIZ))
++sys.path.insert(0, str(RAIZ / "pruebas"))
++
++import test_reglas as T  # noqa: E402
++from vigia.historial import Historial  # noqa: E402
++from vigia.objetos import FiltroObjetos  # noqa: E402
++from vigia.reglas import Reglas  # noqa: E402
++from vigia.simulador import ALTO, ANCHO, H, ZONAS_DEMO, Simulador, esqueleto  # noqa: E402
++from vigia.tipos import Objeto, Observacion, Persona  # noqa: E402
++
++# ------------------------------------------------------------------ situaciones
++def demo():
++    sim = Simulador()
++    return lambda t: (lambda o: (o.personas, o.objetos))(sim.frame(t)[1])
++
++
++def forcejeo(t):
++    a = esqueleto(400 + 0.06 * H * math.sin(2 * math.pi * 1.2 * t), 480, "quieto", t, 0, 1, 0)
++    b = esqueleto(400 + 0.08 * H - 0.06 * H * math.sin(2 * math.pi * 1.2 * t), 480, "quieto", t, 0, -1, 0)
++    return [T._con_munecas_tapadas(1, a), T._con_munecas_tapadas(2, b)], []
++
++
++def golpes(t):
++    a = esqueleto(400, 480, "golpea", t, 0, 1, 0)
++    b = esqueleto(400 + 0.55 * H, 480, "quieto", t, 0, -1, 0)
++    return [T.persona(1, a), T.persona(2, b)], []
++
++
++def huida(t):
++    if t < 1.5:
++        a = esqueleto(400, 480, "golpea", t, 0, 1, 0)
++    else:
++        x = 400 - 2.5 * H * (t - 1.5)
++        a = esqueleto(x, 480, "camina", t, abs(x - 400), -1, 0)
++    v = esqueleto(400 + 0.6 * H, 480, "quieto", t, 0, -1, 0)
++    return [T.persona(1, a), T.persona(2, v)], []
++
++
++def vandalismo(t):
++    auto = np.array([400 + 0.35 * H, 480 - 1.0 * H, 400 + 1.6 * H, 480.0])
++    return [T.persona(1, esqueleto(400, 480, "golpea", t, 0, 1, 0))], [Objeto(9, "auto", auto)]
++
++
++def arma(t):
++    k = esqueleto(400, 480, "quieto", 0, 0, 1, 0)
++    w = k[9]
++    return [T.persona(1, k)], [Objeto(5, "cuchillo", np.array([w[0] - 8, w[1] - 20, w[0] + 8, w[1] + 5]), 0.6)]
++
++
++def moto(t):
++    m = np.array([300, 380, 520, 480.0])
++    if t > 11:
++        m = m + [(t - 11) * 60, 0, (t - 11) * 60, 0]
++    k = esqueleto(410, 470, "quieto", 0, 0, 1, 0)
++    caja = np.array([370, 240, 450, 472.0])
++    ps = []
++    if t < 1:
++        ps.append(Persona(1, caja, k, np.full(17, 0.9)))
++    if t >= 7:
++        ps.append(Persona(2, caja + (m - np.array([300, 380, 520, 480.0]))[[0, 1, 0, 1]], k, np.full(17, 0.9)))
++    return ps, [Objeto(9, "motocicleta", m)]
++
++
++def multitud(n, vel):
++    def f(t):
++        ps = []
++        for i in range(n):
++            x = 60 + i * 55 + vel * H * t
++            ps.append(T.persona(i + 1, esqueleto(x, 300 + (i % 3) * 90, "camina" if vel else "quieto", t, vel * H * t, 1, 0)))
++        return ps, []
++    return f
++
++
++def caida_sola(t):
++    prog = min(1.0, max(0.0, (t - 3.0) / 0.7))
++    b = esqueleto(400, 480, "quieto" if t < 3 else ("cae" if prog < 1 else "tendido"), t, 0, 1, prog)
++    return [T.persona(2, b)], []
++
++
++SITUACIONES = [
++    # nombre, generador (fábrica), segundos, tipo esperado, zonas, filtro de mensaje
++    ("merodeo", demo, 40, "merodeo", ZONAS_DEMO, None),
++    ("intrusión", demo, 40, "intrusion", ZONAS_DEMO, None),
++    ("pelea (golpes)", lambda: golpes, 4, "violencia", (), None),
++    ("forcejeo", lambda: forcejeo, 5, "violencia", (), None),
++    ("caída", lambda: caida_sola, 10, "caida", (), None),
++    ("en el suelo", lambda: caida_sola, 12, "en_suelo", (), None),
++    ("abandono", demo, 88, "abandono", ZONAS_DEMO, None),
++    ("hurto (del piso)", demo, 100, "hurto", ZONAS_DEMO, None),
++    ("arrebato", lambda: T.Arrebato().cuadros(T.Arrebato.tiron), 9, "hurto", (), "arrebato"),
++    ("robo con huida", lambda: huida, 4, "robo_huida", (), None),
++    ("robo de vehículo", lambda: moto, 14, "robo_vehiculo", (), None),
++    ("vandalismo", lambda: vandalismo, 3, "vandalismo", (), None),
++    ("arma", lambda: arma, 5, "arma", (), None),
++    ("aglomeración", lambda: multitud(16, 0.0), 7, "aglomeracion", (), None),
++    ("huida masiva", lambda: multitud(5, 2.5), 6.5, "estampida", (), None),
++]
++
++
++def abrazo(t):
++    a = esqueleto(400, 480, "quieto", t, 0, 1, 0)
++    b = esqueleto(400 + 0.08 * H + 0.004 * H * math.sin(9 * t), 480, "quieto", t, 0, -1, 0)
++    return [T._con_munecas_tapadas(1, a), T._con_munecas_tapadas(2, b)], []
++
++
++def caminar_juntos(t):
++    x = 200 + 0.7 * H * t
++    return [T.persona(1, esqueleto(x, 480, "camina", t, x, 1, 0)),
++            T.persona(2, esqueleto(x + 0.1 * H, 485, "camina", t, x, 1, 0))], []
++
++
++def conversacion(t):
++    """Dos personas conversan a medio metro moviendo las manos (gestos), sin tocarse."""
++    out = []
++    for pid, x, d in ((1, 400, 1), (2, 400 + 0.75 * H, -1)):
++        k = esqueleto(x, 480, "quieto", t, 0, d, 0)
++        for w, e, fase in ((9, 7, 0.0), (10, 8, 1.3)):
++            ang = 0.9 * math.sin(2 * math.pi * 0.8 * t + fase + pid)
++            k[w] = k[e] + np.array([d * 0.12 * H * math.cos(ang), -0.12 * H * math.sin(ang)])
++        out.append(T.persona(pid, k))
++    return out, []
++
++
++def mochila_puesta(t):
++    """Alguien espera 40 s parado con la mochila a la espalda."""
++    k = esqueleto(400, 480, "quieto", t, 0, 1, 0)
++    return [T.persona(1, k)], [Objeto(70, "mochila", np.array([400 - 0.10 * H, 480 - 0.78 * H, 400 + 0.03 * H, 480 - 0.50 * H]))]
++
++
++def dueno_recoge(t):
++    """Deja su mochila, se aleja 15 s y vuelve por ella."""
++    bolsa = np.array([280, 440, 330, 480.0])
++    if t < 3:
++        x = 300.0
++    elif t < 8:
++        x = 300 + (t - 3) * 90
++    elif t < 18:
++        x = 750.0
++    elif t < 22:
++        x = 750 - (t - 18) * 110
++    else:
++        x = 310 - (t - 22) * 120
++    ps = [T.persona(1, esqueleto(x, 480, "camina" if 3 <= t < 8 or t >= 18 else "quieto", t, x, 1 if t < 18 else -1, 0))]
++    if t < 22:
++        objs = [Objeto(50, "mochila", bolsa)] if t >= 2 else []
++    else:
++        objs = [Objeto(51, "mochila", np.array([x - 25, 360, x + 25, 400.0]))]
++    return ps, objs
++
++
++def paso_por_zona(t):
++    x = 60 + 0.8 * H * t
++    return [T.persona(1, esqueleto(x, 470, "camina", t, x, 1, 0))], []
++
++
++def grupo_caminando(t):
++    return multitud(10, 0.8)(t)
++
++
++NEGATIVOS = [
++    # nombre, generador, segundos, tipos que NO deben salir, zonas
++    ("cruzarse caminando", demo, 14, {"violencia", "robo_huida", "hurto"}, ZONAS_DEMO),
++    ("abrazo", lambda: abrazo, 6, {"violencia"}, ()),
++    ("caminar juntos", lambda: caminar_juntos, 4, {"violencia", "robo_huida"}, ()),
++    ("conversar con gestos", lambda: conversacion, 8, {"violencia"}, ()),
++    ("mochila puesta 40 s", lambda: mochila_puesta, 40, {"abandono", "hurto"}, ()),
++    ("dueño recoge su mochila", lambda: dueno_recoge, 26, {"hurto"}, ()),
++    ("pasar por una zona", lambda: paso_por_zona, 6, {"merodeo"}, ZONAS_DEMO),
++    ("grupo caminando", lambda: grupo_caminando, 8, {"aglomeracion", "estampida", "violencia"}, ()),
++]
++
++
++# ------------------------------------------------------------------ condiciones reales
++def _copiar(p: Persona, **cambios) -> Persona:
++    d = dict(id=p.id, caja=p.caja.copy(), puntos=None if p.puntos is None else p.puntos.copy(),
++             conf_puntos=None if p.conf_puntos is None else p.conf_puntos.copy(), conf=p.conf)
++    d.update(cambios)
++    return Persona(d["id"], np.asarray(d["caja"], float), d["puntos"], d["conf_puntos"], d["conf"])
++
++
++class Condicion:
++    paso = 0.1
++    nombre = "ideal"
++
++    def __init__(self, semilla=0):
++        self.rng = np.random.default_rng(semilla)
++
++    def aplicar(self, t, ps, objs):
++        return ps, objs
++
++
++class Lenta(Condicion):
++    def __init__(self, paso, semilla=0):
++        super().__init__(semilla)
++        self.paso, self.nombre = paso, f"PC lenta ({1 / paso:.1f} c/s)"
++
++
++class CambiaID(Condicion):
++    """El seguidor le cambia el número a cada persona cada 4 s (pasa al cruzarse o taparse)."""
++    nombre = "cambia el número"
++
++    def aplicar(self, t, ps, objs):
++        return [_copiar(p, id=p.id + 1000 * int(t // 4)) for p in ps], objs
++
++
++class PiesTapados(Condicion):
++    """Una mesa o el borde de la imagen tapa las piernas (como en el aula): sin rodillas ni tobillos."""
++    nombre = "pies tapados"
++
++    def aplicar(self, t, ps, objs):
++        out = []
++        for p in ps:
++            c = p.conf_puntos.copy() if p.conf_puntos is not None else np.full(17, 0.9)
++            c[13:17] = 0.05
++            caja = p.caja.copy()
++            caja[3] = caja[1] + 0.72 * (caja[3] - caja[1])
++            out.append(_copiar(p, caja=caja, conf_puntos=c))
++        return out, objs
++
++
++class Ruido(Condicion):
++    """Puntos del esqueleto y cajas con temblor (detector real, compresión del video)."""
++    nombre = "ruido en los puntos"
++
++    def aplicar(self, t, ps, objs):
++        out = []
++        for p in ps:
++            alto = p.caja[3] - p.caja[1]
++            pts = None if p.puntos is None else p.puntos + self.rng.normal(0, 0.015 * alto, p.puntos.shape)
++            out.append(_copiar(p, caja=p.caja + self.rng.normal(0, 0.01 * alto, 4), puntos=pts))
++        return out, objs
++
++
++class Huecos(Condicion):
++    """El detector pierde a cada persona en 20 % de los cuadros y a los objetos en 50 %."""
++    nombre = "detecciones perdidas"
++
++    def aplicar(self, t, ps, objs):
++        return ([p for p in ps if self.rng.random() > 0.2],
++                [Objeto(o.id, o.clase, o.caja, 0.5) for o in objs if self.rng.random() > 0.5])
++
++
++class Temblor(Condicion):
++    """Cámara en la mano: toda la imagen se desplaza unos píxeles en cada cuadro."""
++    nombre = "cámara en la mano"
++
++    def __init__(self, semilla=0):
++        super().__init__(semilla)
++        self.d = np.zeros(2)
++
++    def aplicar(self, t, ps, objs):
++        self.d = 0.85 * self.d + self.rng.normal(0, 6, 2)
++        dx, dy = self.d
++        mov = np.array([dx, dy, dx, dy])
++        return ([_copiar(p, caja=p.caja + mov, puntos=None if p.puntos is None else p.puntos + self.d) for p in ps],
++                [Objeto(o.id, o.clase, o.caja + mov, o.conf) for o in objs])
++
++
++CONDICIONES = [lambda: Condicion(), lambda: Lenta(0.4), lambda: Lenta(0.7), CambiaID, PiesTapados, Ruido, Huecos,
++               Temblor]
++
++
++def correr(fabrica, segundos, zonas, condicion, cfg_reglas):
++    gen = fabrica()
++    reglas, hist = Reglas(copy.deepcopy(cfg_reglas)), Historial()
++    filtro = FiltroObjetos(abierto=True)
++    tipos, t = [], 0.0
++    while t < segundos:
++        ps, objs = gen(round(t, 2))
++        ps, objs = condicion.aplicar(t, list(ps), list(objs))
++        objs = filtro.filtrar(objs, t, cfg_reglas["objetos"], ps)
++        obs = Observacion(t=t, personas=ps, objetos=objs)
++        hist.actualizar(obs)
++        tipos += reglas.evaluar(obs, hist, ANCHO, ALTO, list(zonas))
++        t += condicion.paso
++    return tipos
++
++
++def tabla(situaciones=SITUACIONES, condiciones=CONDICIONES):
++    cfg = copy.deepcopy(T.CFG["reglas"])
++    cfg["merodeo"]["tiempo_max"] = 12
++    cfg["objetos"]["tiempo_abandono"] = 10
++    res = {}
++    for nombre, fab, seg, tipo, zonas, texto in situaciones:
++        for cf in condiciones:
++            c = cf()
++            ev = correr(fab, seg, zonas, c, cfg)
++            ok = any(e.tipo == tipo and (texto is None or texto in e.mensaje) for e in ev)
++            res[(nombre, c.nombre)] = ok
++    return res
++
++
++def falsas(negativos=NEGATIVOS, condiciones=CONDICIONES):
++    cfg = copy.deepcopy(T.CFG["reglas"])
++    cfg["merodeo"]["tiempo_max"] = 12
++    cfg["objetos"]["tiempo_abandono"] = 10
++    res = {}
++    for nombre, fab, seg, prohibidos, zonas in negativos:
++        for cf in condiciones:
++            c = cf()
++            ev = correr(fab, seg, zonas, c, cfg)
++            res[(nombre, c.nombre)] = sorted({e.tipo for e in ev} & prohibidos)
++    return res
++
++
++if __name__ == "__main__":
++    r = tabla()
++    conds = list(dict.fromkeys(c for _, c in r))
++    print(f"{'situación':20s} " + " | ".join(f"{c[:14]:14s}" for c in conds))
++    for s in dict.fromkeys(s for s, _ in r):
++        print(f"{s:20s} " + " | ".join(f"{'sí' if r[(s, c)] else 'NO':14s}" for c in conds))
++    print("\nFalsas alarmas (debe estar todo vacío):")
++    f = falsas()
++    for s in dict.fromkeys(s for s, _ in f):
++        print(f"{s:24s} " + " | ".join(f"{','.join(f[(s, c)]) or '-':14s}" for c in conds))
+diff --git a/pruebas/test_reglas.py b/pruebas/test_reglas.py
+index 60fc18f..43d44ff 100644
+--- a/pruebas/test_reglas.py
++++ b/pruebas/test_reglas.py
+@@ -2054,3 +2054,92 @@ class SegundaMiradaEnLaCamara(unittest.TestCase):
+                 if t.revisor:
+                     t.revisor.detener()
+                 s.alertas.cerrar()
++
++
++class CondicionesReales(unittest.TestCase):
++    """Cada situación que VigIA debe detectar, en las condiciones de una prueba en vivo (pruebas/estres.py):
++    PC lenta, números de seguimiento que cambian, pies tapados, ruido, detecciones perdidas y cámara en la mano.
++    Y las situaciones normales que, en esas mismas condiciones, NO deben dar alerta."""
++
++    def test_se_detecta_en_todas_las_condiciones(self):
++        import estres
++        r = estres.tabla()
++        fallas = [f"{s} con {c}" for (s, c), ok in r.items() if not ok]
++        self.assertEqual(fallas, [])
++
++    def test_sin_falsas_alarmas_en_esas_condiciones(self):
++        import estres
++        f = estres.falsas()
++        self.assertEqual({k: v for k, v in f.items() if v}, {})
++
++
++class ContinuidadDePersonas(unittest.TestCase):
++    def _obs(self, t, pid, x, y=480):
++        return Observacion(t=t, personas=[persona(pid, esqueleto(x, y, "quieto", t, 0, 1, 0))])
++
++    def test_el_numero_nuevo_en_el_mismo_lugar_es_la_misma_persona(self):
++        h = Historial()
++        for k in range(20):
++            h.actualizar(self._obs(k / 10, 7, 400))
++        o = self._obs(2.1, 31, 404)                       # el seguidor la perdió un instante y le dio otro número
++        h.actualizar(o)
++        self.assertEqual(o.personas[0].id, 7)
++        self.assertEqual(h.personas[7].primera_vez, 0.0)   # conserva su historia (merodeo, caída, dueño)
++        o = self._obs(2.2, 31, 405)
++        h.actualizar(o)
++        self.assertEqual(o.personas[0].id, 7)             # y se sigue usando el número viejo
++
++    def test_quien_entra_por_donde_otro_sale_es_otra_persona(self):
++        h = Historial()
++        for k in range(20):
++            x = 300 + k * 10                               # camina hacia la derecha y sale
++            h.actualizar(Observacion(t=k / 10, personas=[persona(1, esqueleto(x, 480, "camina", k / 10, x, 1, 0))]))
++        o = Observacion(t=2.0, personas=[persona(2, esqueleto(620, 480, "camina", 2.0, 620, -1, 0))])
++        h.actualizar(o)                                    # entra otra persona, más adelante, en sentido contrario
++        self.assertEqual(o.personas[0].id, 2)
++
++    def test_no_se_une_con_alguien_que_sigue_en_la_imagen(self):
++        h = Historial()
++        for k in range(10):
++            h.actualizar(self._obs(k / 10, 1, 400))
++        o = Observacion(t=1.0, personas=[persona(1, esqueleto(400, 480, "quieto", 1, 0, 1, 0)),
++                                         persona(9, esqueleto(420, 480, "quieto", 1, 0, 1, 0))])
++        h.actualizar(o)
++        self.assertEqual(sorted(p.id for p in o.personas), [1, 9])
++
++
++class ReglasEnPcLenta(unittest.TestCase):
++    def test_la_explicacion_dice_como_se_midio(self):
++        import estres
++        ev = estres.correr(lambda: estres.golpes, 4, (), estres.Lenta(0.7), copy.deepcopy(CFG["reglas"]))
++        v = [e for e in ev if e.tipo == "violencia"]
++        self.assertTrue(v)
++        self.assertIn("cambian de lugar", v[0].explicacion)
++
++    def test_salir_un_instante_no_reinicia_el_merodeo(self):
++        from vigia.simulador import H
++        zona = {"id": "m", "nombre": "Entrada", "tipo": "merodeo", "puntos": [[0.2, 0.6], [0.6, 0.6], [0.6, 0.99], [0.2, 0.99]]}
++        cfg = copy.deepcopy(CFG["reglas"])
++        cfg["merodeo"]["tiempo_max"] = 10
++
++        def cuadros(t):
++            y = 480 if int(t * 10) % 40 else ALTO * 0.55       # cada 4 s, los pies «salen» un cuadro (temblor)
++            return [persona(1, esqueleto(400, y, "quieto", t, 0, 1, 0))], []
++        reglas, hist, ev, t = Reglas(cfg), Historial(), [], 0.0
++        while t < 12:
++            ps, objs = cuadros(t)
++            obs = Observacion(t=t, personas=ps, objetos=objs)
++            hist.actualizar(obs)
++            ev += reglas.evaluar(obs, hist, ANCHO, ALTO, [zona])
++            t += 0.1
++        self.assertIn("merodeo", {e.tipo for e in ev})
++
++    def test_pies_tapados_por_una_mesa(self):
++        from vigia.reglas import pies_de
++        p = persona(1, esqueleto(400, 480, "quieto", 0, 0, 1, 0))
++        c = p.conf_puntos.copy()
++        c[13:17] = 0.0
++        tapada = Persona(1, np.array([p.caja[0], p.caja[1], p.caja[2], p.caja[1] + 0.6 * (p.caja[3] - p.caja[1])]),
++                         p.puntos, c)
++        self.assertGreater(pies_de(tapada)[1], tapada.caja[3] + 0.2 * (p.caja[3] - p.caja[1]))   # el piso, no la mesa
++        self.assertAlmostEqual(pies_de(p)[1], p.caja[3], delta=12)
+diff --git a/vigia/chequeo.py b/vigia/chequeo.py
+index 09d4ec8..da57c95 100644
+--- a/vigia/chequeo.py
++++ b/vigia/chequeo.py
+@@ -173,7 +173,8 @@ def evaluar(s: Sondeo, fps: float, revision: bool, contexto: dict) -> dict:
+     # 8. zonas, modelos y emociones
+     zonas = contexto.get("zonas") or []
+     tipos = {z.get("tipo") for z in zonas}
+-    falta = [n for n, t in (("restringida (intrusión)", "restringida"), ("de merodeo", "merodeo")) if t not in tipos]
++    falta = [n for n, t in (("restringida (intrusión)", "restringida"), ("de merodeo", "merodeo"),
++                            ("protegida (vandalismo)", "protegida")) if t not in tipos]
+     puntos.append(_punto("Zonas", "ok" if not falta else "aviso",
+                          f"{len(zonas)} zona(s) dibujada(s)." + (f" Falta una zona {' y una '.join(falta)}." if falta else ""),
+                          "" if not falta else "Botón «Zonas»: dibuje sobre el piso las zonas de los retos."))
+diff --git a/vigia/historial.py b/vigia/historial.py
+index 1e4417f..79a8439 100644
+--- a/vigia/historial.py
++++ b/vigia/historial.py
+@@ -7,7 +7,15 @@ from typing import Optional
+ 
+ import numpy as np
+ 
+-from .tipos import Objeto, Observacion, Persona
++from .tipos import Objeto, Observacion, Persona, alto_estimado
++
++
++def _iou(a, b) -> float:
++    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
++    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
++    inter = ix * iy
++    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
++    return inter / union if union > 0 else 0.0
+ 
+ 
+ @dataclass
+@@ -16,6 +24,7 @@ class Muestra:
+     caja: np.ndarray
+     puntos: Optional[np.ndarray]
+     conf_puntos: Optional[np.ndarray]
++    alto: float = 0.0          # estatura estimada con el esqueleto (se calcula una vez, al guardar la muestra)
+ 
+ 
+ @dataclass
+@@ -30,19 +39,72 @@ class Pista:
+         return [m for m in self.muestras if t_ahora - m.t <= segundos]
+ 
+     def alto_de_pie(self, t_ahora: float, segundos: float = 4.0) -> float:
+-        """Altura más alta reciente: sirve de escala aunque la persona esté agachada o tendida."""
++        """Estatura más alta reciente: sirve de escala aunque la persona esté agachada o tendida. Se estima con
++        el esqueleto, no solo con la caja: si una mesa tapa las piernas, la caja mide medio cuerpo y todas las
++        velocidades «en alturas» saldrían el doble de rápidas."""
+         v = self.ventana(t_ahora, segundos) or list(self.muestras)
+-        return float(max(m.caja[3] - m.caja[1] for m in v)) if v else 1.0
++        return float(max(m.alto or alto_estimado(m.caja, m.puntos, m.conf_puntos) for m in v)) if v else 1.0
+ 
+ 
+ class Historial:
+-    def __init__(self, olvido: float = 5.0):
++    def __init__(self, olvido: float = 5.0, unir_hasta: float = 2.0):
+         self.personas: dict[int, Pista] = {}
+         self.objetos: dict[int, Pista] = {}
+         self.clase_objeto: dict[int, str] = {}
+         self.olvido = olvido
++        self.unir_hasta = unir_hasta          # segundos que se espera a una persona perdida para darle su número
++        self.alias: dict[int, int] = {}       # número nuevo del seguidor -> número con el que se la conoce
++
++    def unificar(self, obs: Observacion) -> None:
++        """El seguidor le cambia el número a una persona cuando la pierde un instante (se cruza con otra, la tapa
++        un mueble, la cámara tiembla o la PC analiza pocos cuadros). Para las reglas sería otra persona: el
++        merodeo empezaría a contar de cero, una caída perdería el «antes» y un arrebato, al dueño.
++
++        Si aparece un número nuevo justo donde se perdió hace poco una persona que no está en este cuadro, se le
++        devuelve el número anterior (en `obs`, para que reglas, dibujo y alertas usen el mismo)."""
++        presentes = set()
++        nuevos = []
++        for p in obs.personas:
++            p.id = self.alias.get(p.id, p.id)
++            if p.id in self.personas:
++                presentes.add(p.id)
++            else:
++                nuevos.append(p)
++        usados = set()
++        for p in nuevos:
++            mejor = None
++            for pid, pista in self.personas.items():
++                hueco = obs.t - pista.ultima_vez
++                if pid in presentes or pid in usados or not 0 < hueco <= self.unir_hasta:
++                    continue
++                m = pista.muestras[-1]
++                alto = max(1.0, float(m.caja[3] - m.caja[1]), float(p.caja[3] - p.caja[1]))
++                # dónde debería estar ahora, si siguió moviéndose como en el último segundo
++                previas = pista.ventana(m.t, 1.0)
++                vel = np.zeros(2)
++                if len(previas) > 1 and m.t - previas[0].t > 0.05:
++                    c0 = (previas[0].caja[:2] + previas[0].caja[2:]) / 2
++                    c1 = (m.caja[:2] + m.caja[2:]) / 2
++                    vel = (c1 - c0) / (m.t - previas[0].t)
++                prevista = m.caja + np.tile(vel * hueco, 2)
++                coincide = _iou(p.caja, prevista)
++                # o los pies quedaron en el mismo lugar (al caer, la caja cambia de forma pero los pies no se mueven)
++                pies_viejos = np.array([(m.caja[0] + m.caja[2]) / 2, m.caja[3]])
++                pies = float(np.linalg.norm(p.pies - pies_viejos)) / alto
++                if coincide >= 0.5 or (_iou(p.caja, m.caja) >= 0.1 and pies <= 0.25):
++                    puntaje = coincide - pies
++                    if mejor is None or puntaje > mejor[0]:
++                        mejor = (puntaje, pid)
++            if mejor is not None:
++                self.alias[p.id] = mejor[1]
++                p.id = mejor[1]
++                usados.add(mejor[1])
++        for r in getattr(obs, "rostros", []) or []:
++            if r.persona_id is not None:
++                r.persona_id = self.alias.get(r.persona_id, r.persona_id)
+ 
+     def actualizar(self, obs: Observacion) -> None:
++        self.unificar(obs)
+         for p in obs.personas:
+             self._agregar(self.personas, p.id, obs.t, p.caja, p.puntos, p.conf_puntos)
+         for o in obs.objetos:
+@@ -51,6 +113,8 @@ class Historial:
+         for tabla in (self.personas, self.objetos):
+             for k in [k for k, v in tabla.items() if obs.t - v.ultima_vez > self.olvido]:
+                 del tabla[k]
++        for k in [k for k, v in self.alias.items() if v not in self.personas]:
++            del self.alias[k]
+ 
+     @staticmethod
+     def _agregar(tabla, id_, t, caja, puntos, conf):
+@@ -58,9 +122,10 @@ class Historial:
+         if pista is None:
+             pista = tabla[id_] = Pista(id=id_, primera_vez=t, ultima_vez=t)
+         pista.ultima_vez = t
+-        pista.muestras.append(Muestra(t, np.asarray(caja, float),
+-                                      None if puntos is None else np.asarray(puntos, float),
+-                                      None if conf is None else np.asarray(conf, float)))
++        caja = np.asarray(caja, float)
++        puntos = None if puntos is None else np.asarray(puntos, float)
++        conf = None if conf is None else np.asarray(conf, float)
++        pista.muestras.append(Muestra(t, caja, puntos, conf, alto_estimado(caja, puntos, conf)))
+ 
+     def visibles(self, t: float, tabla: str = "personas") -> list[Pista]:
+         d = self.personas if tabla == "personas" else self.objetos
+diff --git a/vigia/reglas.py b/vigia/reglas.py
+index 3884d23..aaaecad 100644
+--- a/vigia/reglas.py
++++ b/vigia/reglas.py
+@@ -68,6 +68,48 @@ def velocidades_extremidades(p: Pista, t: float, ventana: float, alto: float) ->
+     return out
+ 
+ 
++def paso_muestras(muestras) -> float:
++    """Segundos típicos entre dos cuadros analizados (0.1 a 10 c/s; 0.7 en una PC que da 1.4 c/s)."""
++    ts = [m.t for m in muestras]
++    return float(np.median(np.diff(ts))) if len(ts) > 1 else 0.1
++
++
++def agitacion(p: Pista, t: float, ventana: float = 1.5, puntos=None) -> float:
++    """Cuánto se mueven las manos y los codos respecto del torso (desvío de su posición, en alturas). Con pocos
++    cuadros por segundo la velocidad no se puede medir (un golpe dura menos que el hueco entre dos cuadros), pero
++    un brazo que golpea o forcejea aparece cada vez en un lugar distinto; uno que acompaña la marcha, casi en el mismo."""
++    puntos = puntos or (MUNECA_I, MUNECA_D, CODO_I, CODO_D)
++    v = [m for m in p.ventana(t, ventana) if m.puntos is not None]
++    if len(v) < 3:
++        return 0.0
++    alto = p.alto_de_pie(t)
++    mejor = 0.0
++    for k in puntos:
++        rel = [m.puntos[k] - _torso(m) for m in v if m.conf_puntos is None or m.conf_puntos[k] >= 0.3]
++        if len(rel) >= 3:
++            mejor = max(mejor, float(np.std(np.array(rel), axis=0).max()) / alto)
++    return mejor
++
++
++def pies_de(p) -> np.ndarray:
++    """Dónde pisa la persona. Si una mesa o el borde de la imagen tapa las piernas, la caja termina en la cintura:
++    se estima el piso con la estatura (las zonas se dibujan sobre el piso)."""
++    tobillos = [q for q in (p.punto(TOBILLO_I), p.punto(TOBILLO_D)) if q is not None]
++    if len(tobillos) == 2:
++        return np.array([(p.caja[0] + p.caja[2]) / 2, max(float(np.mean([q[1] for q in tobillos])), p.caja[3])])
++    if p.alto - (p.caja[3] - p.caja[1]) > 0.15 * p.alto and p.punto(NARIZ) is not None:
++        return np.array([(p.caja[0] + p.caja[2]) / 2, p.caja[1] + p.alto])
++    return p.pies
++
++
++def caja_completa(p) -> np.ndarray:
++    """Caja de la persona entera aunque se vea solo de la cintura para arriba."""
++    c = np.asarray(p.caja, float).copy()
++    if p.alto - (c[3] - c[1]) > 0.15 * p.alto and p.punto(NARIZ) is not None:
++        c[3] = c[1] + p.alto
++    return c
++
++
+ def zona_cuerpo(persona, margen: float = 0.12):
+     """Rectángulo del tronco y la cabeza (nariz, hombros y caderas) ampliado; sin pose, la caja entera."""
+     if persona.puntos is not None:
+@@ -307,6 +349,7 @@ class Reglas:
+         r = self.cfg
+         if self._t0 is None:
+             self._t0 = obs.t
++        self._hist = hist                      # para la segunda mirada (vigia/revision.py: sospecha)
+         self._rap = self._rapidez(obs, hist)
+         self._registrar_contactos(obs, hist)
+         if r["violencia"]["activa"]:
+@@ -346,6 +389,14 @@ class Reglas:
+             paso = float(np.median(np.diff([ti for ti, _ in vel]))) if len(vel) > 1 else 0.125
+             dur = paso * sum(1 for _, v in vel if v >= umbral)
+             pista.estado["vel_max"] = max((v for _, v in vel), default=0.0)
++            pista.estado.pop("agitacion", None)
++            if paso >= 0.2:
++                # PC lenta (menos de 5 c/s): un golpe cae entre dos cuadros y su velocidad no se ve. Se mide en
++                # cambio cuánto cambian de lugar las manos y codos respecto del torso en 1.5 s.
++                ag = agitacion(pista, obs.t, max(1.5, 3.5 * paso))
++                if ag >= self.cfg["violencia"].get("agitacion_lenta", 0.11):
++                    pista.estado["agitacion"] = ag
++                    dur = max(dur, self.cfg["violencia"]["duracion_min"])
+             out[p.id] = (dur, pista.estado["vel_max"])
+         return out
+ 
+@@ -377,7 +428,7 @@ class Reglas:
+         for k in [k for k, tc in self._ultimo_toque.items() if t - tc > 10]:
+             del self._ultimo_toque[k]
+         for k in list(self._juntos):
+-            self._juntos[k] = [m for m in self._juntos[k] if t - m[0] <= 3.0]
++            self._juntos[k] = [m for m in self._juntos[k] if t - m[0] <= 4.0]
+             if not self._juntos[k]:
+                 del self._juntos[k]
+ 
+@@ -387,16 +438,18 @@ class Reglas:
+         f = {**FORCEJEO, **self.cfg["violencia"].get("forcejeo", {})}
+         if not f["activa"]:
+             return None
+-        muestras = [m for m in self._juntos.get((min(a, b), max(a, b)), []) if t - m[0] <= f["duracion"]]
+-        if len(muestras) < 3 or t - muestras[0][0] < 0.8 * f["duracion"]:
++        paso = paso_muestras(pistas[a].ventana(t, 3.0))
++        duracion = max(f["duracion"], 3.5 * paso)            # con pocos cuadros por segundo, una ventana más larga
++        muestras = [m for m in self._juntos.get((min(a, b), max(a, b)), []) if t - m[0] <= duracion]
++        if len(muestras) < 3 or t - muestras[0][0] < 0.8 * duracion - 0.5 * paso:
+             return None
+         juntos = sum(1 for _, j in muestras if j) / len(muestras)
+         if juntos < 0.7:
+             return None
+         # posición de una persona respecto de la otra, cuadro a cuadro: en un forcejeo va y viene (empujones,
+         # tirones) pero no se aleja; dos personas que se cruzan caminando también se tapan, pero pasan de largo
+-        pa = {round(m.t, 3): _torso(m) for m in pistas[a].ventana(t, f["duracion"])}
+-        pb = {round(m.t, 3): _torso(m) for m in pistas[b].ventana(t, f["duracion"])}
++        pa = {round(m.t, 3): _torso(m) for m in pistas[a].ventana(t, duracion)}
++        pb = {round(m.t, 3): _torso(m) for m in pistas[b].ventana(t, duracion)}
+         comunes = sorted(set(pa) & set(pb))
+         if len(comunes) < 3:
+             return None
+@@ -406,8 +459,25 @@ class Reglas:
+         neto = float(np.linalg.norm(rel[-1] - rel[0]))
+         if neto > 0.5 or neto > 0.6 * recorrido:
+             return None                                        # pasaron de largo o se separaron
++        # caminando juntos (de la mano, abrazados, uno al lado del otro) los cuerpos se tapan y no se separan, y los
++        # brazos se balancean rápido; pero los dos avanzan a la par. En un forcejeo se quedan casi en el mismo lugar.
++        comun = (self._vel_vector(pistas[a], t, duracion) + self._vel_vector(pistas[b], t, duracion)) / 2
++        if float(np.linalg.norm(comun)) >= 0.35:
++            return None
+         empuje = recorrido / max(comunes[-1] - comunes[0], 1e-6)
+         brazos = max(self._rapidez_brazos(pistas[a], t), self._rapidez_brazos(pistas[b], t))
++        if paso >= 0.2:
++            # PC lenta: el vaivén de un empujón dura menos que el hueco entre cuadros y la velocidad sale baja.
++            # Se mide cuánto cambia de lugar un cuerpo respecto del otro y los brazos respecto de su torso.
++            vaiven = float(np.std(np.array(rel), axis=0).max())
++            ag = max(agitacion(pistas[a], t, duracion), agitacion(pistas[b], t, duracion))
++            if vaiven < f.get("vaiven_lento", 0.04) and ag < self.cfg["violencia"].get("agitacion_lenta", 0.11):
++                return None
++            return (f"Cuerpo a cuerpo durante {t - muestras[0][0]:.1f} s ({juntos:.0%} del tiempo), sin separarse, con "
++                    f"un vaivén de {vaiven:.2f} alturas entre ambos cuerpos y brazos que cambian de lugar {ag:.2f} "
++                    f"alturas (umbrales {f.get('vaiven_lento', 0.04)} y "
++                    f"{self.cfg['violencia'].get('agitacion_lenta', 0.11)}; medido con {1 / paso:.1f} cuadros por "
++                    "segundo, sin velocidades).")
+         if brazos < f["brazos"] and empuje < f["empuje"]:
+             return None                                        # juntos y quietos: un abrazo, una conversación
+         return (f"Cuerpo a cuerpo durante {t - muestras[0][0]:.1f} s ({juntos:.0%} del tiempo) con movimiento brusco: "
+@@ -461,10 +531,15 @@ class Reglas:
+                 golpes = dur >= c["duracion_min"] and (not c.get("requiere_contacto", True) or
+                                                       contacto(pistas[a], pb, t) or contacto(pistas[b], pa, t))
+                 if golpes:
++                    ag = max(pistas[a].estado.get("agitacion", 0.0), pistas[b].estado.get("agitacion", 0.0))
++                    medida = (f"Brazos que cambian de lugar {ag:.2f} alturas respecto del torso (umbral "
++                              f"{c.get('agitacion_lenta', 0.11)}; con pocos cuadros por segundo no se puede medir la "
++                              "velocidad de cada golpe)" if ag and vmax < c["velocidad_extremidades"] else
++                              f"Extremidades a {vmax:.1f} alturas/s (umbral {c['velocidad_extremidades']}) durante "
++                              f"{dur:.1f} s")
+                     eventos.append(Evento(
+                         "violencia", "alta", f"Posible pelea entre las personas #{a} y #{b}",
+-                        f"Extremidades a {vmax:.1f} alturas/s (umbral {c['velocidad_extremidades']}) durante "
+-                        f"{dur:.1f} s, con {dist:.2f} alturas de separación y contacto de una mano o un pie "
++                        f"{medida}, con {dist:.2f} alturas de separación y contacto de una mano o un pie "
+                         "con el tronco o la cabeza de la otra persona.",
+                         f"violencia:{a}-{b}", [pa.caja.tolist(), pb.caja.tolist()]))
+                     continue
+@@ -553,13 +628,21 @@ class Reglas:
+             pista = hist.personas.get(p.id)
+             if pista is None:
+                 continue
+-            fx, fy = p.pies[0] / ancho, p.pies[1] / alto
++            pies = pies_de(p)
++            fx, fy = pies[0] / ancho, pies[1] / alto
+             desde = pista.estado.setdefault("zona_desde", {})
++            fuera = pista.estado.setdefault("zona_fuera", {})
++            tolerancia = c["merodeo"].get("tolerancia_salida", 2.0)
+             for z in zonas:
+                 dentro = punto_en_poligono(fx, fy, z["puntos"])
+                 if not dentro:
++                    # salir un instante (la cámara tiembla, los pies pisan el borde) no reinicia el merodeo
++                    if z["id"] in desde and t - fuera.setdefault(z["id"], t) < tolerancia:
++                        continue
+                     desde.pop(z["id"], None)
++                    fuera.pop(z["id"], None)
+                     continue
++                fuera.pop(z["id"], None)
+                 desde.setdefault(z["id"], t)
+                 if z.get("tipo") == "restringida" and c["intrusion"]["activa"]:
+                     out.append(Evento(
+@@ -658,6 +741,19 @@ class Reglas:
+                 return True
+         return False
+ 
++    @staticmethod
++    def _encima_de(per, o) -> bool:
++        """¿La persona lleva el objeto puesto o agarrado (no apoyado en el piso a sus pies)?"""
++        pies = pies_de(per)
++        if fraccion_dentro(o.caja, per.caja) >= 0.6 and o.caja[3] < pies[1] - 0.2 * per.alto:
++            return True                                   # a la espalda, colgado del hombro, abrazado
++        for k in (MUNECA_I, MUNECA_D):
++            q = per.punto(k)
++            if q is not None and o.caja[0] - 0.05 * per.alto <= q[0] <= o.caja[2] + 0.05 * per.alto \
++                    and o.caja[1] - 0.05 * per.alto <= q[1] <= o.caja[3] + 0.05 * per.alto:
++                return True                               # la mano dentro del objeto: lo tiene agarrado
++        return False
++
+     def _objetos(self, obs, hist) -> list[Evento]:
+         c = self.cfg["objetos"]
+         t = obs.t
+@@ -693,9 +789,21 @@ class Reglas:
+             if est["origen"] == "escenario":
+                 self._recordar_escenario(o.caja)
+                 continue
+-            ultimos = pista.ventana(t, 1.5)
+-            mov = float(np.linalg.norm(ultimos[-1].caja[:2] - ultimos[0].caja[:2])) if len(ultimos) > 1 else 0.0
++            ultimos = pista.ventana(t, max(1.5, 2.5 * paso_muestras(pista.muestras)))
++            # se compara la posición media de la primera y la segunda mitad de la ventana: el temblor de una cámara
++            # en la mano mueve la caja unos píxeles en cada cuadro, pero en promedio queda en el mismo lugar
++            if len(ultimos) > 1:
++                mitad = len(ultimos) // 2
++                c0 = np.mean([(m.caja[:2] + m.caja[2:]) / 2 for m in ultimos[:mitad]], axis=0)
++                c1 = np.mean([(m.caja[:2] + m.caja[2:]) / 2 for m in ultimos[mitad:]], axis=0)
++                mov = float(np.linalg.norm(c1 - c0))
++            else:
++                mov = 0.0
+             quieto = mov < 0.35 * diag
++            if quieto:
++                est.pop("mov_desde", None)
++            elif mov < 1.0 * diag and t - est.setdefault("mov_desde", t) < 1.0:
++                quieto = True            # un sacudón breve (cámara en la mano) no es que alguien lo movió
+ 
+             def cercania(per):
+                 return float(np.linalg.norm(per.centro - o.centro)) / per.alto
+@@ -713,8 +821,15 @@ class Reglas:
+                     est["origen"] = "escenario"            # apareció sin nadie cerca: no lo trajo nadie
+                     self._recordar_escenario(o.caja)
+                     continue
++            # una mochila a la espalda o en la mano de alguien que está parado también está «quieta», pero no la
++            # dejaron: no cuenta para abandono ni para el hurto «del piso» (de eso se encarga la regla de arrebato)
++            if quieto and any(self._encima_de(per, o) for per in obs.personas):
++                est.pop("quieto_desde", None)
++                est.pop("solo_desde", None)
++                continue
+             if quieto:
+-                est.setdefault("quieto_desde", t)
++                # estuvo quieto toda la ventana que se acaba de medir, no recién ahora
++                est.setdefault("quieto_desde", ultimos[0].t if len(ultimos) > 1 else t)
+                 tiempo_quieto = t - est["quieto_desde"]
+                 if tiempo_quieto >= 3:
+                     est["estuvo_quieto"] = True
+@@ -796,8 +911,12 @@ class Reglas:
+             if rec["avisado"] or rec["dueno"] is None:
+                 continue
+             a = rec["dueno"]
+-            ultimos = [(tm, q) for tm, q in rec["muestras"] if rec["ult"] - tm <= c["cambio_min"]]
+-            if not ultimos or rec["ult"] - ultimos[0][0] < 0.6 * c["cambio_min"]:
++            # con pocos cuadros por segundo, «lo tiene el otro desde hace 0.6 s» puede ser un solo cuadro:
++            # la ventana se alarga para que haya al menos dos
++            paso = float(np.median(np.diff([tm for tm, _ in rec["muestras"]]))) if len(rec["muestras"]) > 1 else 0.1
++            cambio = max(c["cambio_min"], 1.5 * paso)
++            ultimos = [(tm, q) for tm, q in rec["muestras"] if rec["ult"] - tm <= cambio]
++            if not ultimos or rec["ult"] - ultimos[0][0] < 0.6 * cambio:
+                 continue
+             otros = [q for _, q in ultimos if q and a not in q]
+             if len(otros) < 0.8 * len(ultimos):
+@@ -805,7 +924,7 @@ class Reglas:
+             b = otros[-1][0]
+             # pasó directo de las manos (o la espalda) del dueño a las de otro: no lo recogió del piso horas después
+             con_dueno = [tm for tm, q in rec["muestras"] if a in q]
+-            if not con_dueno or ultimos[0][0] - con_dueno[-1] > 2.0:
++            if not con_dueno or ultimos[0][0] - con_dueno[-1] > max(2.0, 3 * paso):
+                 continue
+             pa, pb = personas.get(a), personas.get(b)
+             if pb is None and b in hist.personas and t - hist.personas[b].ultima_vez <= 1.0:
+@@ -851,7 +970,7 @@ class Reglas:
+             if cerca:
+                 q = min(cerca, key=lambda x: np.linalg.norm(x["centro"] - o.centro))
+             else:
+-                encima = [p for p in obs.personas if solape(p.caja, o.caja) >= c["solape_min"]]
++                encima = [p for p in obs.personas if solape(caja_completa(p), o.caja) >= c["solape_min"]]
+                 q = {"clase": o.clase, "centro": o.centro.copy(), "diag": diag, "desde": t, "ult": t,
+                      "dueno": encima[0].id if encima else None, "toques": {}}
+                 self._puestos.append(q)
+@@ -859,7 +978,7 @@ class Reglas:
+             q["ult"] = t
+             estacionado = t - q["desde"]
+             movido = float(np.linalg.norm(o.centro - q["centro"])) / q["diag"]
+-            encima = {p.id: p for p in obs.personas if solape(p.caja, o.caja) >= c["solape_min"]}
++            encima = {p.id: p for p in obs.personas if solape(caja_completa(p), o.caja) >= c["solape_min"]}
+             for pid in list(q["toques"]):
+                 if pid not in encima:
+                     del q["toques"][pid]
+@@ -990,8 +1109,10 @@ class Reglas:
+         c = self.cfg["aglomeracion"]
+         t = obs.t
+         out = []
+-        n = len(obs.personas)
++        # personas vistas en el último segundo: en una multitud el detector pierde a varias en cada cuadro
++        n = max(len(obs.personas), sum(1 for q in hist.personas.values() if t - q.ultima_vez <= 1.0))
+         if n >= c["max_personas"]:
++            self._multitud_bajo = None
+             if self._multitud_desde is None:
+                 self._multitud_desde = t
+             if t - self._multitud_desde >= c["duracion"]:
+@@ -999,8 +1120,12 @@ class Reglas:
+                     "aglomeracion", "media", f"Aglomeración: {n} personas en la cámara",
+                     f"Hay {n} personas o más (límite {c['max_personas']}) desde hace {t - self._multitud_desde:.0f} s.",
+                     "aglomeracion"))
+-        else:
+-            self._multitud_desde = None
++        elif self._multitud_desde is not None:
++            # unos cuadros con menos personas (tapadas, perdidas) no cortan la aglomeración: 2 s seguidos sí
++            if getattr(self, "_multitud_bajo", None) is None:
++                self._multitud_bajo = t
++            if t - self._multitud_bajo >= 2.0:
++                self._multitud_desde = self._multitud_bajo = None
+         vel_huida = self.cfg.get("huida", {}).get("velocidad", 1.6)
+         corriendo = [p for p in obs.personas if p.id in hist.personas
+                      and velocidad_cuerpo(hist.personas[p.id], t) >= vel_huida]
+diff --git a/vigia/reto.py b/vigia/reto.py
+index 80832f6..9a1338d 100644
+--- a/vigia/reto.py
++++ b/vigia/reto.py
+@@ -33,6 +33,12 @@ RETOS = [
+     {"id": "forcejeo", "titulo": "Simulen un forcejeo (en pareja)",
+      "instruccion": "Tómense de los brazos y forcejeen unos segundos, de lado a la cámara. Sin golpes reales.",
+      "tipos": ["violencia"], "limite": 25},
++    {"id": "huida", "titulo": "Toca y huye (en pareja)",
++     "instruccion": "Acércate a tu compañero, tócale el hombro o el brazo y sal corriendo. Él se queda quieto.",
++     "tipos": ["robo_huida", "hurto"], "limite": 25},
++    {"id": "vandalismo", "titulo": "Golpea lo protegido",
++     "instruccion": "Sin nadie a tu lado, golpea varias veces (sin fuerza) la caja o mesa de la zona azul «protegida».",
++     "tipos": ["vandalismo"], "limite": 25, "zona": "protegida"},
+     {"id": "sonrisa", "titulo": "Sonríe a la cámara",
+      "instruccion": "Mira de frente a la cámara y sonríe. Requiere el análisis de expresiones.",
+      "emocion": "alegría", "limite": 15},
+diff --git a/vigia/revision.py b/vigia/revision.py
+index b105901..3357259 100644
+--- a/vigia/revision.py
++++ b/vigia/revision.py
+@@ -31,12 +31,14 @@ import numpy as np
+ 
+ from .historial import Historial
+ from .objetos import FiltroObjetos
+-from .reglas import PORTATILES, Reglas, alto_estimado, cuerpos_juntos, sostiene
++from .reglas import ARMAS, PORTATILES, VEHICULOS, Reglas, alto_estimado, cuerpos_juntos, solape, sostiene, \
++    velocidad_cuerpo
+ 
+ log = logging.getLogger("vigia.revision")
+ 
+ # situaciones rápidas: las que la vista en vivo puede perder entre dos cuadros
+-REVISABLES = {"violencia", "caida", "en_suelo", "hurto", "robo_huida", "arma"}
++REVISABLES = {"violencia", "caida", "en_suelo", "hurto", "robo_huida", "arma", "robo_vehiculo", "vandalismo",
++              "estampida"}
+ 
+ REVISION = {
+     "activa": True,
+@@ -101,9 +103,20 @@ def sospecha(obs, reglas: Reglas, cfg: dict) -> Optional[str]:
+             if cuerpos_juntos(a, b) or float(np.linalg.norm(ca - cb)) / max(alto, 1.0) <= cfg["distancia_sospecha"]:
+                 return f"personas #{a.id} y #{b.id} juntas"
+     umbral = reglas.cfg.get("violencia", {}).get("velocidad_extremidades", 1.8)
+-    for pid, (_, v) in getattr(reglas, "_rap", {}).items():
+-        if v >= 0.6 * umbral:
++    for pid, (dur, v) in getattr(reglas, "_rap", {}).items():
++        if v >= 0.6 * umbral or dur > 0:
+             return f"movimiento brusco de la persona #{pid}"
++    hist = getattr(reglas, "_hist", None)
++    if hist is not None:
++        corre = [p.id for p in personas if p.id in hist.personas
++                 and velocidad_cuerpo(hist.personas[p.id], obs.t) >= 0.7 * reglas.cfg.get("huida", {}).get("velocidad", 1.6)]
++        if corre:
++            return f"persona #{corre[0]} corriendo"
++    for o in obs.objetos:
++        if o.clase in ARMAS:
++            return f"posible {o.clase} a la vista"
++        if o.clase in VEHICULOS and any(solape(p.caja, o.caja) >= 0.15 for p in personas):
++            return f"persona junto a un vehículo ({o.clase})"
+     for p in personas:
+         w, h = p.caja[2] - p.caja[0], p.caja[3] - p.caja[1]
+         if w > 1.1 * h:
+diff --git a/web/static/reto.js b/web/static/reto.js
+index 7e850ed..f836d0a 100644
+--- a/web/static/reto.js
++++ b/web/static/reto.js
+@@ -2,7 +2,7 @@
+ // Reto VigIA: el visitante actúa una situación y la página espera la alerta correspondiente por SSE.
+ const $ = (s) => document.querySelector(s);
+ const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+-const NOMBRE_ZONA = { restringida: "roja (restringida)", merodeo: "amarilla (merodeo)" };
++const NOMBRE_ZONA = { restringida: "roja (restringida)", merodeo: "amarilla (merodeo)", protegida: "azul (protegida)" };
+ 
+ let datos = { retos: [], marcador: {}, zonas: {}, emociones: false };
+ let camaras = [];

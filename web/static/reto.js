@@ -2,7 +2,7 @@
 // Reto VigIA: el visitante actúa una situación y la página espera la alerta correspondiente por SSE.
 const $ = (s) => document.querySelector(s);
 const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
-const NOMBRE_ZONA = { restringida: "roja (restringida)", merodeo: "amarilla (merodeo)" };
+const NOMBRE_ZONA = { restringida: "roja (restringida)", merodeo: "amarilla (merodeo)", protegida: "azul (protegida)" };
 
 let datos = { retos: [], marcador: {}, zonas: {}, emociones: false };
 let camaras = [];
