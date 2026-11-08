@@ -351,6 +351,21 @@ class Trabajador:
         res.update(id=self.id, nombre=self.nombre)
         return res
 
+    def redibujar(self) -> None:
+        """Vuelve a dibujar el último cuadro con las zonas actuales. En pausa (o con el video terminado) no se
+        analizan cuadros nuevos, así que una zona recién guardada no aparecería hasta reanudar."""
+        if self.crudo is None or getattr(self, "_ultimo_dibujo", None) is None:
+            return
+        en_pausa = self._pausa_desde is not None or (self.lector is not None and self.lector.terminado)
+        if not en_pausa:
+            return                                  # el próximo cuadro ya la dibuja
+        obs, en_alerta, emociones, enc, esqueleto, duenos = self._ultimo_dibujo
+        img = self.crudo.copy()
+        dibujar(img, obs, self.zonas, en_alerta, emociones, enc, grueso=esqueleto, duenos=duenos)
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if ok:
+            self.jpeg = buf.tobytes()
+
     def _reloj(self) -> float:
         """Hora para el análisis: la del sistema menos el tiempo que el video estuvo en pausa."""
         ahora = self._pausa_desde if self._pausa_desde is not None else time.time()   # en pausa, quieto
@@ -484,7 +499,9 @@ class Trabajador:
             enc += "  |  MODO DEMO (escena simulada)"
         if esqueleto:
             enc += "  |  SOLO ESQUELETO"
-        dibujar(frame, obs, self.zonas, en_alerta, emociones, enc, grueso=esqueleto, duenos=self.reglas.duenos(self.hist))
+        duenos = self.reglas.duenos(self.hist)
+        self._ultimo_dibujo = (obs, en_alerta, emociones, enc, esqueleto, duenos)   # para redibujar en pausa
+        dibujar(frame, obs, self.zonas, en_alerta, emociones, enc, grueso=esqueleto, duenos=duenos)
         self.alertas.procesar(self.id, eventos, frame)
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
         if ok:

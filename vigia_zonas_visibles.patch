@@ -1,0 +1,222 @@
+diff --git a/pruebas/test_reglas.py b/pruebas/test_reglas.py
+index 43d44ff..cd42ac9 100644
+--- a/pruebas/test_reglas.py
++++ b/pruebas/test_reglas.py
+@@ -2143,3 +2143,31 @@ class ReglasEnPcLenta(unittest.TestCase):
+                          p.puntos, c)
+         self.assertGreater(pies_de(tapada)[1], tapada.caja[3] + 0.2 * (p.caja[3] - p.caja[1]))   # el piso, no la mesa
+         self.assertAlmostEqual(pies_de(p)[1], p.caja[3], delta=12)
++
++
++class ZonasEnVideoPausado(unittest.TestCase):
++    """Prueba en clase: se dibujó una zona con el video en pausa, se guardó y no se veía."""
++
++    def test_guardar_zonas_redibuja_el_cuadro_en_pausa(self):
++        import time as _t
++        from vigia.servidor import Sistema
++        with tempfile.TemporaryDirectory() as d:
++            cfg = copy.deepcopy(CFG)
++            cfg["camaras"] = []
++            s = Sistema(cfg, Path(d), demo=True)
++            t = s.trabajadores["demo"]
++            try:
++                fin = _t.time() + 5
++                while _t.time() < fin and t.jpeg is None:
++                    _t.sleep(0.05)
++                t.pausar(True)
++                _t.sleep(0.3)
++                antes = t.jpeg
++                s.guardar_zonas("demo", [{"id": "z9", "nombre": "Nueva", "tipo": "restringida",
++                                          "puntos": [[0.05, 0.05], [0.3, 0.05], [0.3, 0.3], [0.05, 0.3]]}])
++                self.assertIsNot(t.jpeg, antes)                  # se redibujó sin reanudar
++                self.assertEqual(t.zonas[0]["nombre"], "Nueva")
++            finally:
++                for w in s.trabajadores.values():
++                    w.detener()
++                s.alertas.cerrar()
+diff --git a/vigia/camara.py b/vigia/camara.py
+index 452ff2f..0b21994 100644
+--- a/vigia/camara.py
++++ b/vigia/camara.py
+@@ -351,6 +351,21 @@ class Trabajador:
+         res.update(id=self.id, nombre=self.nombre)
+         return res
+ 
++    def redibujar(self) -> None:
++        """Vuelve a dibujar el último cuadro con las zonas actuales. En pausa (o con el video terminado) no se
++        analizan cuadros nuevos, así que una zona recién guardada no aparecería hasta reanudar."""
++        if self.crudo is None or getattr(self, "_ultimo_dibujo", None) is None:
++            return
++        en_pausa = self._pausa_desde is not None or (self.lector is not None and self.lector.terminado)
++        if not en_pausa:
++            return                                  # el próximo cuadro ya la dibuja
++        obs, en_alerta, emociones, enc, esqueleto, duenos = self._ultimo_dibujo
++        img = self.crudo.copy()
++        dibujar(img, obs, self.zonas, en_alerta, emociones, enc, grueso=esqueleto, duenos=duenos)
++        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
++        if ok:
++            self.jpeg = buf.tobytes()
++
+     def _reloj(self) -> float:
+         """Hora para el análisis: la del sistema menos el tiempo que el video estuvo en pausa."""
+         ahora = self._pausa_desde if self._pausa_desde is not None else time.time()   # en pausa, quieto
+@@ -484,7 +499,9 @@ class Trabajador:
+             enc += "  |  MODO DEMO (escena simulada)"
+         if esqueleto:
+             enc += "  |  SOLO ESQUELETO"
+-        dibujar(frame, obs, self.zonas, en_alerta, emociones, enc, grueso=esqueleto, duenos=self.reglas.duenos(self.hist))
++        duenos = self.reglas.duenos(self.hist)
++        self._ultimo_dibujo = (obs, en_alerta, emociones, enc, esqueleto, duenos)   # para redibujar en pausa
++        dibujar(frame, obs, self.zonas, en_alerta, emociones, enc, grueso=esqueleto, duenos=duenos)
+         self.alertas.procesar(self.id, eventos, frame)
+         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+         if ok:
+diff --git a/vigia/servidor.py b/vigia/servidor.py
+index d7c632f..e3dd281 100644
+--- a/vigia/servidor.py
++++ b/vigia/servidor.py
+@@ -219,6 +219,9 @@ class Sistema:
+         lista = self.zonas.setdefault(cid, [])
+         lista[:] = zonas          # se modifica la misma lista que usa el trabajador
+         self._f_zonas.write_text(json.dumps(self.zonas, ensure_ascii=False, indent=2), encoding="utf-8")
++        t = self.trabajadores.get(cid)
++        if t is not None:
++            t.redibujar()             # un video en pausa o terminado muestra las zonas nuevas sin esperar a reanudar
+ 
+     def _iniciar_busqueda(self) -> None:
+         b = self.cfg["busqueda"]
+diff --git a/web/index.html b/web/index.html
+index 927f03b..e2716e0 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -157,6 +157,7 @@
+     <img id="zona-fondo" alt="Imagen actual de la cámara">
+     <canvas id="zona-lienzo"></canvas>
+   </div>
++  <p id="zona-estado" class="ayuda-linea zona-estado"></p>
+   <ul id="zona-lista" class="zona-lista"></ul>
+   <div class="botones">
+     <button class="btn" id="zona-deshacer" type="button">Deshacer punto</button>
+diff --git a/web/static/app.js b/web/static/app.js
+index a92145d..c18aad1 100644
+--- a/web/static/app.js
++++ b/web/static/app.js
+@@ -446,6 +446,12 @@ $("#form-ajustes").onsubmit = async (e) => {
+ // ------------------------------------------------------------------ editor de zonas
+ const lienzo = $("#zona-lienzo"), ctx = lienzo.getContext("2d");
+ let zonas = [], puntos = [], camZona = null;
++// mensaje breve abajo de la pantalla (se va solo)
++function notificar(texto) {
++  const n = el("div", "notificacion", texto);
++  document.body.append(n);
++  setTimeout(() => n.remove(), 3500);
++}
+ const COLORES = { restringida: "#e5534b", merodeo: "#e3a33a", protegida: "#3d7fd0" };
+ const franja = (z) => (z.horario ? ` · ${z.horario.desde}-${z.horario.hasta}` : " · todo el día");
+ 
+@@ -465,12 +471,23 @@ function dibujarZonas() {
+     ctx.fillStyle = col + "33"; ctx.fill(); ctx.strokeStyle = col; ctx.stroke();
+     ctx.fillStyle = col; ctx.fillText(z.nombre, z.puntos[0][0] * W + 6, z.puntos[0][1] * H + 16);
+   }
++  pintarEstadoZona();
+   if (puntos.length) {
+     ctx.strokeStyle = "#ffffff"; ctx.beginPath();
+     puntos.forEach(([x, y], i) => (i ? ctx.lineTo(x * W, y * H) : ctx.moveTo(x * W, y * H))); ctx.stroke();
+     ctx.fillStyle = "#ffffff"; puntos.forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x * W, y * H, 4, 0, 7); ctx.fill(); });
+   }
+ }
++// lo que el usuario ve debajo de la imagen: si hay un polígono sin cerrar y qué se va a guardar
++function pintarEstadoZona() {
++  const p = $("#zona-estado");
++  p.classList.toggle("pendiente", puntos.length > 0);
++  p.textContent = puntos.length >= 3
++    ? `Polígono sin cerrar (${puntos.length} puntos, en blanco): doble clic para cerrarlo, o «Guardar zonas» lo cierra y lo guarda.`
++    : puntos.length ? `Faltan puntos: una zona necesita al menos 3 (lleva ${puntos.length}).`
++    : zonas.length ? `${zonas.length} zona(s) lista(s). Pulse «Guardar zonas» para que la cámara las use.`
++    : "Sin zonas: haga clic sobre la imagen para marcar la primera.";
++}
+ function pintarListaZonas() {
+   const ul = $("#zona-lista"); ul.replaceChildren();
+   zonas.forEach((z, i) => {
+@@ -493,29 +510,50 @@ $("#btn-zonas").onclick = async () => {
+   $("#dlg-zonas").showModal(); await cargarZonas();
+ };
+ $("#zona-camara").onchange = cargarZonas;
+-$("#zona-fondo").onload = ajustarLienzo;
++$("#zona-fondo").onload = () => {
++  // el recuadro toma la proporción del video (un video vertical de celular no se estira) y no pasa del 60 % de la pantalla
++  const img = $("#zona-fondo"), caja = img.parentElement;
++  if (img.naturalWidth && img.naturalHeight) {
++    const ar = img.naturalWidth / img.naturalHeight;
++    caja.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
++    caja.style.width = `min(calc(100% - 32px), calc(60vh * ${ar.toFixed(4)}))`;
++  }
++  requestAnimationFrame(ajustarLienzo);
++};
+ lienzo.onclick = (e) => {
+   const r = lienzo.getBoundingClientRect();
+   puntos.push([(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]); dibujarZonas();
+ };
+-lienzo.ondblclick = () => {
+-  // el doble clic también disparó dos clics: se quita el punto repetido
+-  while (puntos.length > 1) {
+-    const [a, b] = [puntos.at(-1), puntos.at(-2)];
+-    if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 0.01) puntos.pop(); else break;
+-  }
+-  if (puntos.length < 3) return;
++function cerrarPoligono() {
++  if (puntos.length < 3) return false;
+   const z = { nombre: $("#zona-nombre").value || "Zona", tipo: $("#zona-tipo").value, puntos };
+   const desde = $("#zona-desde").value, hasta = $("#zona-hasta").value;
+   if (desde && hasta && desde !== hasta) z.horario = { desde, hasta };   // vacío = activa todo el día
+   zonas.push(z);
+   puntos = []; $("#zona-nombre").value = `Zona ${zonas.length + 1}`;
+   pintarListaZonas(); dibujarZonas();
++  return true;
++}
++lienzo.ondblclick = () => {
++  // el doble clic también disparó dos clics: se quita el punto repetido
++  while (puntos.length > 1) {
++    const [a, b] = [puntos.at(-1), puntos.at(-2)];
++    if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 0.01) puntos.pop(); else break;
++  }
++  cerrarPoligono();
+ };
+ $("#zona-deshacer").onclick = () => { puntos.pop(); dibujarZonas(); };
+ $("#zona-guardar").onclick = async () => {
+-  zonas = await api(`/api/camaras/${camZona}/zonas`, { method: "PUT", body: JSON.stringify(zonas) });
++  // antes, un polígono dibujado pero sin doble clic se perdía al guardar: ahora se cierra y se guarda
++  if (puntos.length >= 3) cerrarPoligono();
++  else if (puntos.length && !confirm(`El polígono en blanco tiene solo ${puntos.length} punto(s) y no se guardará. ¿Guardar igual?`)) return;
++  try {
++    zonas = await api(`/api/camaras/${camZona}/zonas`, { method: "PUT", body: JSON.stringify(zonas) });
++  } catch (e) {
++    return alert(`No se pudieron guardar las zonas: ${e.message}`);
++  }
+   $("#dlg-zonas").close();
++  notificar(zonas.length ? `${zonas.length} zona(s) guardada(s): se ven sobre el video de la cámara.` : "Zonas borradas.");
+ };
+ addEventListener("resize", () => { if ($("#dlg-zonas").open) ajustarLienzo(); });
+ 
+diff --git a/web/static/style.css b/web/static/style.css
+index 6796962..6e35121 100644
+--- a/web/static/style.css
++++ b/web/static/style.css
+@@ -148,7 +148,10 @@ legend { color: var(--texto); padding: 0 6px; font-weight: 600; }
+ .zonas-barra label { display: flex; gap: 6px; align-items: center; color: var(--tenue); font-size: 13px; }
+ .clases-objeto { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; margin-bottom: 6px; }
+ .ayuda-linea { color: var(--tenue); font-size: 12px; margin: 8px 16px; }
+-.lienzo-zonas { position: relative; margin: 0 16px; background: #000; aspect-ratio: 16 / 9; }
++.lienzo-zonas { position: relative; margin: 0 auto; background: #000; aspect-ratio: 16 / 9; width: calc(100% - 32px);
++  max-width: calc(100% - 32px); }      /* app.js le pone la proporción del video: uno vertical no se ve estirado */
++.zona-estado { min-height: 1.2em; }
++.zona-estado.pendiente { color: #e8b84a; }
+ .lienzo-zonas img, .lienzo-zonas canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; }
+ .lienzo-zonas canvas { cursor: crosshair; }
+ .zona-lista { list-style: none; padding: 0; margin: 10px 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+@@ -216,3 +219,5 @@ legend { color: var(--texto); padding: 0 6px; font-weight: 600; }
+ .chequeo-punto.mal .chequeo-icono { color: #ef6b6b; }
+ .chequeo-punto.pendiente .chequeo-icono { color: var(--tenue); }
+ .chequeo-consejo { color: var(--tenue); margin-top: 2px; }
++.notificacion { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 50; max-width: calc(100% - 32px);
++  background: #1d3b2f; color: #e8fff4; border: 1px solid #3ecf8e; border-radius: 8px; padding: 10px 16px; font-size: 14px; }

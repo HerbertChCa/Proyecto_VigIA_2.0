@@ -2143,3 +2143,31 @@ class ReglasEnPcLenta(unittest.TestCase):
                          p.puntos, c)
         self.assertGreater(pies_de(tapada)[1], tapada.caja[3] + 0.2 * (p.caja[3] - p.caja[1]))   # el piso, no la mesa
         self.assertAlmostEqual(pies_de(p)[1], p.caja[3], delta=12)
+
+
+class ZonasEnVideoPausado(unittest.TestCase):
+    """Prueba en clase: se dibujó una zona con el video en pausa, se guardó y no se veía."""
+
+    def test_guardar_zonas_redibuja_el_cuadro_en_pausa(self):
+        import time as _t
+        from vigia.servidor import Sistema
+        with tempfile.TemporaryDirectory() as d:
+            cfg = copy.deepcopy(CFG)
+            cfg["camaras"] = []
+            s = Sistema(cfg, Path(d), demo=True)
+            t = s.trabajadores["demo"]
+            try:
+                fin = _t.time() + 5
+                while _t.time() < fin and t.jpeg is None:
+                    _t.sleep(0.05)
+                t.pausar(True)
+                _t.sleep(0.3)
+                antes = t.jpeg
+                s.guardar_zonas("demo", [{"id": "z9", "nombre": "Nueva", "tipo": "restringida",
+                                          "puntos": [[0.05, 0.05], [0.3, 0.05], [0.3, 0.3], [0.05, 0.3]]}])
+                self.assertIsNot(t.jpeg, antes)                  # se redibujó sin reanudar
+                self.assertEqual(t.zonas[0]["nombre"], "Nueva")
+            finally:
+                for w in s.trabajadores.values():
+                    w.detener()
+                s.alertas.cerrar()

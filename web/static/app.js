@@ -446,6 +446,12 @@ $("#form-ajustes").onsubmit = async (e) => {
 // ------------------------------------------------------------------ editor de zonas
 const lienzo = $("#zona-lienzo"), ctx = lienzo.getContext("2d");
 let zonas = [], puntos = [], camZona = null;
+// mensaje breve abajo de la pantalla (se va solo)
+function notificar(texto) {
+  const n = el("div", "notificacion", texto);
+  document.body.append(n);
+  setTimeout(() => n.remove(), 3500);
+}
 const COLORES = { restringida: "#e5534b", merodeo: "#e3a33a", protegida: "#3d7fd0" };
 const franja = (z) => (z.horario ? ` · ${z.horario.desde}-${z.horario.hasta}` : " · todo el día");
 
@@ -465,11 +471,22 @@ function dibujarZonas() {
     ctx.fillStyle = col + "33"; ctx.fill(); ctx.strokeStyle = col; ctx.stroke();
     ctx.fillStyle = col; ctx.fillText(z.nombre, z.puntos[0][0] * W + 6, z.puntos[0][1] * H + 16);
   }
+  pintarEstadoZona();
   if (puntos.length) {
     ctx.strokeStyle = "#ffffff"; ctx.beginPath();
     puntos.forEach(([x, y], i) => (i ? ctx.lineTo(x * W, y * H) : ctx.moveTo(x * W, y * H))); ctx.stroke();
     ctx.fillStyle = "#ffffff"; puntos.forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x * W, y * H, 4, 0, 7); ctx.fill(); });
   }
+}
+// lo que el usuario ve debajo de la imagen: si hay un polígono sin cerrar y qué se va a guardar
+function pintarEstadoZona() {
+  const p = $("#zona-estado");
+  p.classList.toggle("pendiente", puntos.length > 0);
+  p.textContent = puntos.length >= 3
+    ? `Polígono sin cerrar (${puntos.length} puntos, en blanco): doble clic para cerrarlo, o «Guardar zonas» lo cierra y lo guarda.`
+    : puntos.length ? `Faltan puntos: una zona necesita al menos 3 (lleva ${puntos.length}).`
+    : zonas.length ? `${zonas.length} zona(s) lista(s). Pulse «Guardar zonas» para que la cámara las use.`
+    : "Sin zonas: haga clic sobre la imagen para marcar la primera.";
 }
 function pintarListaZonas() {
   const ul = $("#zona-lista"); ul.replaceChildren();
@@ -493,29 +510,50 @@ $("#btn-zonas").onclick = async () => {
   $("#dlg-zonas").showModal(); await cargarZonas();
 };
 $("#zona-camara").onchange = cargarZonas;
-$("#zona-fondo").onload = ajustarLienzo;
+$("#zona-fondo").onload = () => {
+  // el recuadro toma la proporción del video (un video vertical de celular no se estira) y no pasa del 60 % de la pantalla
+  const img = $("#zona-fondo"), caja = img.parentElement;
+  if (img.naturalWidth && img.naturalHeight) {
+    const ar = img.naturalWidth / img.naturalHeight;
+    caja.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`;
+    caja.style.width = `min(calc(100% - 32px), calc(60vh * ${ar.toFixed(4)}))`;
+  }
+  requestAnimationFrame(ajustarLienzo);
+};
 lienzo.onclick = (e) => {
   const r = lienzo.getBoundingClientRect();
   puntos.push([(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]); dibujarZonas();
 };
-lienzo.ondblclick = () => {
-  // el doble clic también disparó dos clics: se quita el punto repetido
-  while (puntos.length > 1) {
-    const [a, b] = [puntos.at(-1), puntos.at(-2)];
-    if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 0.01) puntos.pop(); else break;
-  }
-  if (puntos.length < 3) return;
+function cerrarPoligono() {
+  if (puntos.length < 3) return false;
   const z = { nombre: $("#zona-nombre").value || "Zona", tipo: $("#zona-tipo").value, puntos };
   const desde = $("#zona-desde").value, hasta = $("#zona-hasta").value;
   if (desde && hasta && desde !== hasta) z.horario = { desde, hasta };   // vacío = activa todo el día
   zonas.push(z);
   puntos = []; $("#zona-nombre").value = `Zona ${zonas.length + 1}`;
   pintarListaZonas(); dibujarZonas();
+  return true;
+}
+lienzo.ondblclick = () => {
+  // el doble clic también disparó dos clics: se quita el punto repetido
+  while (puntos.length > 1) {
+    const [a, b] = [puntos.at(-1), puntos.at(-2)];
+    if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 0.01) puntos.pop(); else break;
+  }
+  cerrarPoligono();
 };
 $("#zona-deshacer").onclick = () => { puntos.pop(); dibujarZonas(); };
 $("#zona-guardar").onclick = async () => {
-  zonas = await api(`/api/camaras/${camZona}/zonas`, { method: "PUT", body: JSON.stringify(zonas) });
+  // antes, un polígono dibujado pero sin doble clic se perdía al guardar: ahora se cierra y se guarda
+  if (puntos.length >= 3) cerrarPoligono();
+  else if (puntos.length && !confirm(`El polígono en blanco tiene solo ${puntos.length} punto(s) y no se guardará. ¿Guardar igual?`)) return;
+  try {
+    zonas = await api(`/api/camaras/${camZona}/zonas`, { method: "PUT", body: JSON.stringify(zonas) });
+  } catch (e) {
+    return alert(`No se pudieron guardar las zonas: ${e.message}`);
+  }
   $("#dlg-zonas").close();
+  notificar(zonas.length ? `${zonas.length} zona(s) guardada(s): se ven sobre el video de la cámara.` : "Zonas borradas.");
 };
 addEventListener("resize", () => { if ($("#dlg-zonas").open) ajustarLienzo(); });
 

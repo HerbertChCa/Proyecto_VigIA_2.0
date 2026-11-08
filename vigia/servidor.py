@@ -219,6 +219,9 @@ class Sistema:
         lista = self.zonas.setdefault(cid, [])
         lista[:] = zonas          # se modifica la misma lista que usa el trabajador
         self._f_zonas.write_text(json.dumps(self.zonas, ensure_ascii=False, indent=2), encoding="utf-8")
+        t = self.trabajadores.get(cid)
+        if t is not None:
+            t.redibujar()             # un video en pausa o terminado muestra las zonas nuevas sin esperar a reanudar
 
     def _iniciar_busqueda(self) -> None:
         b = self.cfg["busqueda"]

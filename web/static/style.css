@@ -148,7 +148,10 @@ legend { color: var(--texto); padding: 0 6px; font-weight: 600; }
 .zonas-barra label { display: flex; gap: 6px; align-items: center; color: var(--tenue); font-size: 13px; }
 .clases-objeto { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; margin-bottom: 6px; }
 .ayuda-linea { color: var(--tenue); font-size: 12px; margin: 8px 16px; }
-.lienzo-zonas { position: relative; margin: 0 16px; background: #000; aspect-ratio: 16 / 9; }
+.lienzo-zonas { position: relative; margin: 0 auto; background: #000; aspect-ratio: 16 / 9; width: calc(100% - 32px);
+  max-width: calc(100% - 32px); }      /* app.js le pone la proporción del video: uno vertical no se ve estirado */
+.zona-estado { min-height: 1.2em; }
+.zona-estado.pendiente { color: #e8b84a; }
 .lienzo-zonas img, .lienzo-zonas canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; }
 .lienzo-zonas canvas { cursor: crosshair; }
 .zona-lista { list-style: none; padding: 0; margin: 10px 16px; display: flex; gap: 8px; flex-wrap: wrap; }
@@ -216,3 +219,5 @@ legend { color: var(--texto); padding: 0 6px; font-weight: 600; }
 .chequeo-punto.mal .chequeo-icono { color: #ef6b6b; }
 .chequeo-punto.pendiente .chequeo-icono { color: var(--tenue); }
 .chequeo-consejo { color: var(--tenue); margin-top: 2px; }
+.notificacion { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 50; max-width: calc(100% - 32px);
+  background: #1d3b2f; color: #e8fff4; border: 1px solid #3ecf8e; border-radius: 8px; padding: 10px 16px; font-size: 14px; }
