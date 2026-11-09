@@ -36,7 +36,8 @@ sys.path.insert(0, str(RAIZ))
 from vigia.dibujo import dibujar  # noqa: E402
 from vigia.historial import Historial  # noqa: E402
 from vigia.objetos import FiltroObjetos  # noqa: E402
-from vigia.reglas import PORTATILES, Reglas, angulo_tronco, esta_tendido, medidas_tendido, sostiene  # noqa: E402
+from vigia.reglas import (PORTATILES, Reglas, angulo_tronco, esta_tendido, es_horizontal, medidas_tendido,  # noqa: E402
+                          sostiene)
 
 
 def movimiento_de_camara(previo, actual) -> float:
@@ -151,6 +152,8 @@ def main():
                                               cc.get("puntos_cabeza_min", 3)) else "de pie"
             m = pista.muestras[-1]
             ang = angulo_tronco(m)
+            if marca == "TENDIDO" and not es_horizontal(m, cc["angulo_horizontal"]):
+                marca = "TENDIDO(tronco vertical)"     # solo «aplastado»: sin una caída previa no dispara la alerta
             postura.append(
                 f"#{p.id}:{marca} pies-cad={num(d['pies_cadera'])} cad-cab={num(d['cadera_cabeza'])} (cruda {num(d['cadera_cabeza_cruda'])}) "
                 f"canilla={num(d['canilla'])} "

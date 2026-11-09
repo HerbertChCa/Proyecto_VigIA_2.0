@@ -604,7 +604,8 @@ class Reglas:
             if pista is None or not pista.muestras:
                 continue
             est = pista.estado.setdefault("caida", {"horiz_desde": None, "vert_desde": t,
-                                                     "caida": False, "suelo": False})
+                                                     "caida": False, "suelo": False,
+                                                     "n_tendido": 0, "n_horizontal": 0})
             ultima = pista.muestras[-1]
             # la altura de pie se fija al empezar a caer: tendida en el suelo, la caja ya no sirve de escala
             alto = est["alto_ref"] if est["horiz_desde"] is not None and est.get("alto_ref") else pista.alto_de_pie(t, 6.0)
@@ -612,11 +613,14 @@ class Reglas:
                 if est["horiz_desde"] is None:
                     est["horiz_desde"], est["alto_ref"] = t, alto
                 est["vert_desde"] = None
+                # ¿el tronco se ve realmente horizontal? Es la única señal que no sale de las medidas de «cuerpo aplastado»
+                est["n_tendido"] += 1
+                est["n_horizontal"] += bool(es_horizontal(ultima, c["angulo_horizontal"]))
             else:
                 if est["vert_desde"] is None:
                     est["vert_desde"] = t
                 if t - est["vert_desde"] >= 1.0:   # se levantó: se reinicia el episodio
-                    est.update(horiz_desde=None, caida=False, suelo=False)
+                    est.update(horiz_desde=None, caida=False, suelo=False, n_tendido=0, n_horizontal=0)
                 continue
             tendido = t - est["horiz_desde"]
             alto = max(est["alto_ref"], largo_cuerpo(ultima) / 0.85, 1.0)
@@ -643,7 +647,12 @@ class Reglas:
                                 f"a cuerpo) en los 3 s previos a la caída, y #{p.id} quedó en el suelo.",
                                 f"violencia:derribo:{agresor}:{p.id}",
                                 [p.caja.tolist()] + ([otro.caja.tolist()] if otro is not None else [])))
-            if not est["suelo"] and tendido >= c["en_suelo_alerta"]:
+            # «Cuerpo aplastado» sale de puntos que el modelo inventa cuando algo tapa a la persona (un mostrador, una
+            # mesa, una moto): de pie y con las piernas ocultas también se ve «aplastada». Por eso no basta el estado;
+            # hace falta verla CAER (el cuerpo bajó) o ver el tronco realmente horizontal la mayor parte del tiempo.
+            respaldo = (not c.get("exigir_respaldo", True) or est["caida"]
+                        or est["n_horizontal"] >= c.get("horizontal_min", 0.5) * max(est["n_tendido"], 1))
+            if not est["suelo"] and tendido >= c["en_suelo_alerta"] and respaldo:
                 est["suelo"] = True
                 out.append(Evento(
                     "en_suelo", "alta", f"Persona #{p.id} tendida en el suelo",

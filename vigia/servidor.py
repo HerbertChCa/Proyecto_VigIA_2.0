@@ -254,6 +254,17 @@ class Sistema:
                 "solo_esqueleto": bool(self.cfg["privacidad"].get("solo_esqueleto"))}
 
 
+class EstaticosActualizados(StaticFiles):
+    """Los archivos del panel (app.js, style.css) se revalidan en cada carga. Sin esto el navegador puede seguir
+    usando durante horas la versión vieja después de cambiar el código, y el panel parece no haber cambiado.
+    Si el archivo no cambió, el servidor responde 304 sin enviarlo otra vez, así que no cuesta nada."""
+
+    async def get_response(self, path, scope):
+        respuesta = await super().get_response(path, scope)
+        respuesta.headers["Cache-Control"] = "no-cache"
+        return respuesta
+
+
 def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -> Starlette:
     sis: Sistema | None = None
 
@@ -263,7 +274,7 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
         app.state.sistema = sis
 
     async def index(_):
-        return FileResponse(WEB / "index.html")
+        return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-cache"})
 
     async def video(req: Request):
         cid = req.path_params["cid"]
@@ -428,7 +439,7 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
     # ---- feria: retos
     def pagina(archivo: str):
         async def servir(_):
-            return FileResponse(WEB / archivo)
+            return FileResponse(WEB / archivo, headers={"Cache-Control": "no-cache"})
         return servir
 
     def zonas_por_camara() -> dict:
@@ -518,6 +529,16 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
                                 status_code=400)
         return JSONResponse({"ok": True, "pausado": quiere})
 
+    async def rebobinar(req: Request):
+        """Vuelve a empezar un video subido desde el principio y lo reanuda, en cualquier momento."""
+        t = sis.trabajadores.get(req.path_params["cid"])
+        if t is None:
+            return JSONResponse({"error": "La cámara ya no existe."}, status_code=404)
+        if not t.volver_a_empezar():
+            return JSONResponse({"error": "Solo se puede volver a empezar un video; una cámara en vivo no se rebobina."},
+                                status_code=400)
+        return JSONResponse({"ok": True})
+
     async def modo_video(req: Request):
         """Video subido: {"detallado": true} = cuadro a cuadro (cámara lenta si hace falta); false = tiempo real."""
         t = sis.trabajadores.get(req.path_params["cid"])
@@ -576,6 +597,7 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
         Route("/api/alertas.csv", alertas_csv),
         Route("/api/reiniciar", reiniciar, methods=["POST"]),
         Route("/api/camaras/{cid}/pausa", pausa, methods=["POST"]),
+        Route("/api/camaras/{cid}/rebobinar", rebobinar, methods=["POST"]),
         Route("/api/camaras/{cid}/modo", modo_video, methods=["POST"]),
         Route("/api/camaras/{cid}/revisar", revisar, methods=["POST"]),
         Route("/api/camaras/{cid}/chequeo", chequeo),
@@ -598,7 +620,7 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
         Route("/api/encuesta.csv", encuesta_csv),
         Route("/api/encuesta/qr.png", encuesta_qr),
         Route("/api/buscar", buscar),
-        Mount("/static", StaticFiles(directory=WEB / "static"), name="static"),
+        Mount("/static", EstaticosActualizados(directory=WEB / "static"), name="static"),
     ]
     @asynccontextmanager
     async def vida(_app):

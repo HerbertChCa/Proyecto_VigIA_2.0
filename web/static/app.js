@@ -32,8 +32,39 @@ function pitido() {
   o.connect(g).connect(audio.destination); o.start(); o.stop(audio.currentTime + 0.25);
 }
 
+// ------------------------------------------------------------------ video ampliado
+let ampliada = null;                       // la tarjeta que se ve grande (una sola a la vez)
+function ampliar(tarjeta, si) {
+  if (si && ampliada && ampliada !== tarjeta) ampliar(ampliada, false);
+  tarjeta.classList.toggle("ampliada", si);
+  const b = tarjeta.querySelector(".ampliar");
+  if (b) {
+    b.textContent = si ? "⤡" : "⤢";
+    b.title = si ? "Volver al panel (Esc)" : "Ampliar el video (también doble clic sobre la imagen)";
+  }
+  if (si) ampliada = tarjeta; else if (ampliada === tarjeta) ampliada = null;
+  document.body.classList.toggle("hay-ampliada", !!ampliada);
+  if (!si && document.fullscreenElement === tarjeta) document.exitFullscreen().catch(() => {});
+}
+document.addEventListener("keydown", (e) => {
+  // con la pantalla completa del navegador, el primer Esc sale de ella (lo atiende el navegador) y el segundo vuelve al panel
+  if (e.key === "Escape" && ampliada && !document.fullscreenElement) ampliar(ampliada, false);
+});
+// una alerta de la cámara que se ve grande se muestra sobre el video: la lista de alertas queda tapada
+let temporizadorAviso = 0;
+function avisoEnAmpliada(a) {
+  if (!ampliada || ampliada.dataset.id !== String(a.camara)) return;
+  const caja = ampliada.querySelector(".alerta-ampliada");
+  caja.textContent = `${a.tipo_nombre || a.tipo}: ${a.mensaje}`;
+  caja.classList.toggle("alta", a.severidad === "alta");
+  caja.hidden = false;
+  clearTimeout(temporizadorAviso);
+  temporizadorAviso = setTimeout(() => { caja.hidden = true; }, 8000);
+}
+
 // ------------------------------------------------------------------ cámaras
 function pintarCamaras() {
+  if (ampliada && !ampliada.isConnected) { ampliada = null; document.body.classList.remove("hay-ampliada"); }
   const cont = $("#camaras");
   const ids = estado.camaras.map((c) => c.id);
   [...cont.children].forEach((n) => { if (!ids.includes(n.dataset.id)) n.remove(); });
@@ -41,8 +72,14 @@ function pintarCamaras() {
     let tarjeta = cont.querySelector(`[data-id="${c.id}"]`);
     if (!tarjeta) {
       tarjeta = el("article", "camara"); tarjeta.dataset.id = c.id;
+      // Cabecera en dos líneas: arriba el nombre (se corta con «…» si es largo) y los botones, que nunca se mueven;
+      // abajo los fps y la precisión. Un nombre largo ya no empuja los botones fuera de la tarjeta.
       const cab = el("div", "camara-cab");
-      cab.append(el("h3", null, c.nombre), el("span", "meta"), el("span", "precision"));
+      const titulo = el("h3", null, c.nombre); titulo.title = c.nombre;
+      const acciones = el("div", "camara-acciones");
+      const estadoCab = el("div", "camara-estado");
+      estadoCab.append(el("span", "meta"), el("span", "precision"));
+      cab.append(titulo, acciones, estadoCab);
       const quitar = el("button", "quitar", "✕"); quitar.title = "Quitar cámara";
       quitar.onclick = async () => {
         if (!confirm(`¿Quitar la cámara «${c.nombre}»?`)) return;
@@ -54,6 +91,7 @@ function pintarCamaras() {
         }
         // sin esperar al siguiente estado del servidor: si la conexión en vivo está caída, la tarjeta igual desaparece
         estado.camaras = estado.camaras.filter((x) => x.id !== c.id);
+        if (ampliada === tarjeta) ampliar(tarjeta, false);
         tarjeta.remove();
       };
       // Pausa: solo en videos subidos (y en el modo demo); una cámara en vivo no se detiene
@@ -71,6 +109,22 @@ function pintarCamaras() {
           alert(`No se pudo ${quiere ? "pausar" : "reanudar"} el video: ${e.message}`);
         } finally {
           pausa.disabled = false;
+        }
+      };
+      // Volver al principio: en cualquier momento, no solo cuando el video termina (entonces lo hace ↻). Solo videos.
+      const inicio = el("button", "inicio", "⏮"); inicio.hidden = true;
+      inicio.title = "Volver al principio del video";
+      inicio.onclick = async () => {
+        inicio.disabled = true;
+        try {
+          await api(`/api/camaras/${c.id}/rebobinar`, { method: "POST" });
+          const actual = estado.camaras.find((x) => x.id === c.id);
+          if (actual) { actual.pausado = false; actual.terminado = false; }     // sin esperar al servidor
+          pintarCamaras();
+        } catch (e) {
+          alert(`No se pudo volver al principio del video: ${e.message}`);
+        } finally {
+          inicio.disabled = false;
         }
       };
       // Video subido: «Detallado» analiza cada segundo completo (cámara lenta si la PC no alcanza);
@@ -99,8 +153,20 @@ function pintarCamaras() {
         catch (e) { alert(`No se pudo revisar: ${e.message}`); }
         finally { setTimeout(() => { revisar.disabled = false; }, 1500); }
       };
-      cab.append(revisar, modo, pausa, quitar);
+      // Ampliar: la cámara pasa a ocupar toda la ventana (Esc o el mismo botón para volver); desde ahí, pantalla
+      // completa del navegador. El video sigue siendo el mismo, así que no se reinicia nada.
+      const ampliarBtn = el("button", "ampliar", "⤢");
+      ampliarBtn.onclick = () => ampliar(tarjeta, !tarjeta.classList.contains("ampliada"));
+      const completa = el("button", "completa", "⛶"); completa.title = "Pantalla completa";
+      completa.onclick = () => {
+        if (document.fullscreenElement) { document.exitFullscreen(); return; }
+        const p = tarjeta.requestFullscreen && tarjeta.requestFullscreen();
+        if (p && p.catch) p.catch(() => alert("Este navegador no permite la pantalla completa."));
+      };
+      acciones.append(revisar, modo, inicio, pausa, ampliarBtn, completa, quitar);
+      ampliar(tarjeta, false);                                     // deja el texto y el título iniciales del botón
       const video = el("div", "video");
+      video.ondblclick = () => ampliar(tarjeta, !tarjeta.classList.contains("ampliada"));
       const img = el("img"); img.alt = `Video de ${c.nombre}`;
       // Cada cuadro se pide por separado en vez de mantener un video MJPEG abierto: el navegador solo admite
       // 6 conexiones abiertas a la vez con el mismo servidor, y con 5 cámaras y las alertas en vivo se llenaban.
@@ -114,7 +180,8 @@ function pintarCamaras() {
       img.onerror = () => setTimeout(cargar, 1000);             // aún sin imagen o cámara caída
       setTimeout(cargar, 0);
       video.append(img, el("div", "estado"));
-      video.append(el("div", "segunda-mirada"));
+      const avisoAmp = el("div", "alerta-ampliada"); avisoAmp.hidden = true;
+      video.append(el("div", "segunda-mirada"), avisoAmp);
       tarjeta.append(cab, video, el("div", "emociones"));
       cont.append(tarjeta);
     }
@@ -152,6 +219,7 @@ function pintarCamaras() {
     sm.hidden = !(rev && (rev.revisando || rev.pendientes));
     if (!sm.hidden) sm.textContent = rev.revisando ? `Segunda mirada: revisando cuadro a cuadro… ${rev.progreso} %`
       : "Segunda mirada: esperando los segundos siguientes…";
+    tarjeta.querySelector(".inicio").hidden = !c.pausable || !!c.terminado;    // terminado: el botón ↻ ya lo hace
     const boton = tarjeta.querySelector(".pausa");
     boton.hidden = !c.pausable;
     boton.textContent = c.terminado ? "↻" : c.pausado ? "▶" : "⏸";
@@ -249,6 +317,7 @@ function llegaAlerta(a) {
   alertasCargadas.set(a.id, a);
   if (alertasCargadas.size > 500) alertasCargadas.delete(alertasCargadas.keys().next().value);
   camaraEnAlerta.set(a.camara, Date.now());
+  avisoEnAmpliada(a);
   if (a.severidad === "alta") pitido();
   if (filtro && a.tipo !== filtro) return;
   const lista = $("#alertas");
