@@ -115,8 +115,14 @@ reglas:
   caida:
     activa: true
     angulo_horizontal: 60         # grados del tronco respecto de la vertical
+    puntos_cabeza_min: 3          # de los 5 puntos de la cabeza, cuántos deben verse (>= 0.3) para medir «cuerpo aplastado»;
+                                  # con menos se mira el ángulo del tronco. 0 = siempre medir la cabeza (como antes)
     descenso_min: 0.35            # caída del centro de cadera (alturas) en <= 2.5 s
     en_suelo_alerta: 5            # segundos tendido para alerta de "persona en el suelo"
+    exigir_respaldo: true         # «persona en el suelo» solo si se la vio caer o el tronco se ve horizontal; el cuerpo
+                                  # «aplastado» por sí solo engaña cuando un mostrador o una mesa tapa las piernas.
+                                  # false = como antes (basta el cuerpo aplastado)
+    horizontal_min: 0.5           # fracción del tiempo tendido en que el tronco debe verse horizontal (si no hubo caída)
   merodeo:
     activa: true
     tiempo_max: 60                # segundos en una zona de merodeo

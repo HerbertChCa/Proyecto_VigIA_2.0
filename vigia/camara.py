@@ -54,7 +54,8 @@ class Lector:
         self._desfase = 0.0
         self._parar = False
         self._lock = threading.Lock()
-        threading.Thread(target=self._bucle, daemon=True).start()
+        self._hilo = threading.Thread(target=self._bucle, daemon=True)
+        self._hilo.start()
 
     def _abrir(self):
         if isinstance(self.fuente, int):
@@ -121,6 +122,8 @@ class Lector:
         while not self._parar:
             if self._rebobinar:
                 self._rebobinar = False
+                with self._lock:
+                    self._tomado = True             # descarta el cuadro que esperaba al análisis: es de antes de volver
                 self._desfase = self.t_video + 1.0  # el reloj del análisis sigue avanzando: nunca vuelve atrás
                 self.vuelta += 1
                 self.terminado = False
@@ -188,7 +191,11 @@ class Lector:
         self._rebobinar = True
 
     def detener(self):
+        """Pide parar y espera (hasta 3 s) a que el hilo suelte el video. En Windows un archivo abierto no se puede
+        borrar: sin esta espera, quitar una cámara dejaba el .mp4 en datos/videos."""
         self._parar = True
+        if self._hilo.is_alive() and threading.current_thread() is not self._hilo:
+            self._hilo.join(timeout=3.0)
 
 
 class Trabajador:
@@ -212,6 +219,7 @@ class Trabajador:
         self._tiempos: deque = deque(maxlen=20)
         self._parar = False
         self._reiniciar = False
+        self._conservar_ignorados = False   # al reiniciar, mantener las falsas alarmas que marcó el operador
         self._t0 = time.time()
         self._pausa_desde: Optional[float] = None   # instante en que se pausó (solo videos subidos y demo)
         self._pausa_total = 0.0                     # segundos en pausa acumulados: el reloj del análisis no avanza
@@ -292,6 +300,21 @@ class Trabajador:
         self.estado["pausado"] = self._pausa_desde is not None
         if not pausado:
             self.estado["terminado"] = False
+        return True
+
+    def volver_a_empezar(self) -> bool:
+        """Vuelve a empezar el video desde el principio cuando el operador lo pide (no solo cuando termina) y lo
+        reanuda. Olvida lo aprendido de la escena, porque las personas «saltan» de lugar, pero conserva las alertas ya
+        registradas y las falsas alarmas marcadas. Una cámara en vivo no tiene a dónde volver: devuelve False."""
+        if not self.pausable:
+            return False
+        if self.demo:
+            self._t0 = self._reloj()               # el guion de la escena simulada vuelve al segundo 0
+            self._conservar_ignorados = True
+            self._reiniciar = True                 # lo aplica el hilo de la cámara en su siguiente cuadro
+        elif self.lector is not None:
+            self.lector.rebobinar()                # el hilo de la cámara ve la vuelta nueva y olvida lo anterior
+        self.pausar(False)
         return True
 
     def modo_detallado(self, detallado: bool) -> bool:
@@ -388,10 +411,11 @@ class Trabajador:
         self._en_alerta.clear()
         self._tiempos.clear()
         self._reiniciar = False
+        self._conservar_ignorados = False
 
     def _paso(self):
         if self._reiniciar:
-            self._aplicar_reinicio()
+            self._aplicar_reinicio(conservar_ignorados=self._conservar_ignorados)
         priv = self.cfg["privacidad"]
         if self.demo:
             t = self._reloj() - self._t0

@@ -808,9 +808,10 @@ def _comprimir(k, pies, factor_y, cx=None):
 
 
 class PosicionesDeCamara(unittest.TestCase):
-    def correr(self, poses):
-        """poses(t) -> puntos de la persona 1; devuelve los tipos de alerta."""
+    def correr(self, poses, caida=None):
+        """poses(t) -> puntos de la persona 1; devuelve los tipos de alerta. `caida` cambia opciones de la regla."""
         reglas, hist, tipos, t = reglas_demo(), Historial(), [], 0.0
+        reglas.cfg["caida"].update(caida or {})
         while t < 12:
             obs = Observacion(t=t, personas=[_persona(1, poses(t))])
             hist.actualizar(obs)
@@ -852,6 +853,86 @@ class PosicionesDeCamara(unittest.TestCase):
         tipos = self.correr(poses)
         self.assertIn("caida", tipos)
         self.assertIn("en_suelo", tipos)
+
+    def test_de_pie_con_las_piernas_tapadas_no_es_persona_en_el_suelo(self):
+        """Caso real (noticiero, cámara a la altura del pecho): una persona de pie detrás de un mostrador. El modelo
+        inventa las piernas pegadas a la cadera y el cuerpo sale «aplastado», pero el tronco sigue vertical y nunca
+        se la vio caer: no hay motivo para avisar de «persona en el suelo»."""
+        de_pie = esqueleto(400, 480, "quieto", 0, 0, 1, 0)
+        tras_el_mostrador = _comprimir(de_pie, 480, 0.65, 400)
+
+        def poses(t):
+            return de_pie if t < 2 else tras_el_mostrador
+        tipos = self.correr(poses)
+        self.assertNotIn("en_suelo", tipos)
+        self.assertNotIn("caida", tipos)
+        # con la opción anterior (basta el cuerpo aplastado) sí había falsa alarma: la prueba reproduce el caso
+        self.assertIn("en_suelo", self.correr(poses, caida={"exigir_respaldo": False}))
+
+    def test_acostarse_despacio_con_el_tronco_horizontal_si_es_persona_en_el_suelo(self):
+        """Sin caída brusca, con el tronco visiblemente horizontal, el aviso sigue funcionando."""
+        def poses(t):
+            if t < 2:
+                return esqueleto(400, 480, "quieto", 0, 0, 1, 0)
+            return esqueleto(400, 480, "tendido", 0, 0, 1, 1)
+        tipos = self.correr(poses)
+        self.assertIn("en_suelo", tipos)
+
+    def test_medidas_de_tendido_explican_la_decision(self):
+        """`medidas_tendido` (que usa el diagnóstico de videos) entrega los mismos números en que se apoya
+        `esta_tendido`: de pie queda lejos de los umbrales, aplastado contra el piso queda por debajo."""
+        from vigia.reglas import esta_tendido, medidas_tendido
+        de_pie = esqueleto(400, 480, "quieto", 0, 0, 1, 0)
+        conf = np.full(17, 0.9)
+        caja = _persona(1, de_pie).caja
+        alto = float(caja[3] - caja[1])
+        m = Muestra(0.0, caja, de_pie, conf)
+        d = medidas_tendido(m, alto)
+        self.assertGreaterEqual(d["pies_cadera"], 0.35)
+        self.assertAlmostEqual(d["conf_min"], 0.9)
+        self.assertFalse(esta_tendido(m, 60, alto))
+
+        aplastado = _comprimir(de_pie, 480, 0.2, 400)
+        m2 = Muestra(1.0, _persona(1, aplastado).caja, aplastado, conf)
+        d2 = medidas_tendido(m2, alto)
+        self.assertLess(d2["pies_cadera"], 0.35)
+        self.assertLess(d2["cadera_cabeza"], 0.33)
+        self.assertTrue(esta_tendido(m2, 60, alto))
+
+        conf_baja = conf.copy()
+        conf_baja[[15, 16]] = 0.1                     # tobillos sin confianza: no se puede medir cadera-pies
+        d3 = medidas_tendido(Muestra(0.0, caja, de_pie, conf_baja), alto)
+        self.assertIsNone(d3["pies_cadera"])
+        self.assertAlmostEqual(d3["conf_min"], 0.1)
+        self.assertAlmostEqual(d3["conf_tobillos"], 0.1)
+        self.assertAlmostEqual(d3["conf_cabeza"], 0.9)
+        self.assertEqual(d3["n_cabeza"], 5)
+
+    def test_cabeza_dudosa_no_decide_que_alguien_esta_tendido(self):
+        """Caso real (cámara alta, de noche): una persona de pie, con el tronco vertical y las piernas bien
+        detectadas, tenía la cabeza medida con 1 o 2 puntos casi sin confianza; esa medida saltaba alrededor del
+        umbral y daba «persona en el suelo». Con la cabeza dudosa se mira el ángulo del tronco; con la cabeza bien
+        vista, el cuerpo aplastado sigue detectándose."""
+        from vigia.reglas import esta_tendido, medidas_tendido
+        de_pie = esqueleto(400, 480, "quieto", 0, 0, 1, 0)
+        caja = _persona(1, de_pie).caja
+        alto = float(caja[3] - caja[1])
+        k = _comprimir(de_pie, 480, 0.65, 400)        # piernas «cortas» por la perspectiva (como en el video real); tronco vertical
+        caja_k = _persona(1, k).caja
+
+        bien = Muestra(0.0, caja_k, k, np.full(17, 0.9))
+        self.assertTrue(esta_tendido(bien, 60, alto))                 # cabeza bien vista: aplastado
+
+        conf = np.full(17, 0.9)
+        conf[[0, 1]] = 0.35                           # solo 2 puntos de la cabeza pasan 0.3
+        conf[[2, 3, 4]] = 0.05
+        dudosa = Muestra(0.0, caja_k, k, conf)
+        d = medidas_tendido(dudosa, alto)
+        self.assertEqual(d["n_cabeza"], 2)
+        self.assertIsNone(d["cadera_cabeza"])
+        self.assertIsNotNone(d["cadera_cabeza_cruda"])
+        self.assertFalse(esta_tendido(dudosa, 60, alto))              # de pie: el tronco está vertical
+        self.assertTrue(esta_tendido(dudosa, 60, alto, puntos_cabeza_min=1))   # con la opción anterior, falsa alarma
 
     def test_caida_de_costado_frente_a_la_camara(self):
         def poses(t):
@@ -1536,6 +1617,7 @@ class PausaDeVideo(unittest.TestCase):
                 for t in s.trabajadores.values():
                     t.detener()
                 s.alertas.cerrar()
+                s.encuesta.cerrar()
 
     def test_camara_en_vivo_no_se_pausa(self):
         from vigia.camara import Trabajador
@@ -1564,6 +1646,7 @@ class PausaDeVideo(unittest.TestCase):
                 for t in s.trabajadores.values():
                     t.detener()
                 s.alertas.cerrar()
+                s.encuesta.cerrar()
 
     def test_ruta_de_pausa(self):
         """La ruta se llama como lo haría el navegador (ASGI directo: no hace falta instalar httpx)."""
@@ -1614,9 +1697,91 @@ class PausaDeVideo(unittest.TestCase):
                     self.assertEqual(estado, 404)
                 finally:
                     sis.alertas.cerrar()
+                    sis.encuesta.cerrar()
 
         with tempfile.TemporaryDirectory() as d:
             asyncio.run(probar(d))
+
+    def test_ruta_de_volver_al_principio(self):
+        import asyncio
+        import json as _json
+        from vigia.servidor import crear_app
+
+        async def pedir(app, ruta):
+            enviado, respuesta = False, {"cuerpo": b""}
+
+            async def recibir():
+                nonlocal enviado
+                if enviado:
+                    await asyncio.sleep(3600)
+                enviado = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            async def enviar(m):
+                if m["type"] == "http.response.start":
+                    respuesta["estado"] = m["status"]
+                elif m["type"] == "http.response.body":
+                    respuesta["cuerpo"] += m.get("body", b"")
+            alcance = {"type": "http", "method": "POST", "path": ruta, "raw_path": ruta.encode(), "query_string": b"",
+                       "headers": [(b"content-type", b"application/json"), (b"host", b"localhost")],
+                       "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 8000), "scheme": "http",
+                       "root_path": "", "http_version": "1.1", "asgi": {"version": "3.0"}}
+            await app(alcance, recibir, enviar)
+            return respuesta["estado"], _json.loads(respuesta["cuerpo"] or b"{}")
+
+        async def probar(d):
+            cfg = copy.deepcopy(CFG)
+            cfg["camaras"] = []
+            app = crear_app(cfg, Path(d), demo=True)
+            async with app.router.lifespan_context(app):
+                sis = app.state.sistema
+                t = sis.trabajadores["demo"]
+                for _ in range(100):
+                    if t.estado.get("pausable"):
+                        break
+                    await asyncio.sleep(0.05)
+                try:
+                    t.pausar(True)
+                    estado, r = await pedir(app, "/api/camaras/demo/rebobinar")
+                    self.assertEqual((estado, r["ok"]), (200, True))
+                    self.assertFalse(t.estado["pausado"])               # volver al principio también reanuda
+                    estado, _ = await pedir(app, "/api/camaras/nada/rebobinar")
+                    self.assertEqual(estado, 404)
+                    t.demo = False                                      # sin video con duración: una cámara en vivo
+                    estado, r = await pedir(app, "/api/camaras/demo/rebobinar")
+                    self.assertEqual(estado, 400)
+                    self.assertIn("en vivo", r["error"])
+                finally:
+                    t.demo = True
+                    sis.alertas.cerrar()
+                    sis.encuesta.cerrar()
+
+        with tempfile.TemporaryDirectory() as d:
+            asyncio.run(probar(d))
+
+
+class PanelSinCache(unittest.TestCase):
+    """Tras cambiar app.js o style.css el panel seguía viéndose igual: el servidor no decía nada sobre el caché y el
+    navegador reutilizaba la copia vieja durante horas. Ahora los archivos del panel se revalidan siempre."""
+
+    def test_archivos_del_panel_se_revalidan_siempre(self):
+        import asyncio
+        from vigia.servidor import WEB, EstaticosActualizados
+
+        async def pedir(estaticos, cabeceras):
+            alcance = {"type": "http", "method": "GET", "headers": cabeceras}
+            return await estaticos.get_response("app.js", alcance)
+
+        async def probar():
+            estaticos = EstaticosActualizados(directory=WEB / "static")
+            r = await pedir(estaticos, [])
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.headers["cache-control"], "no-cache")
+            # el navegador pregunta con el ETag: si no cambió, 304 (sin reenviar el archivo) y la misma regla de caché
+            r2 = await pedir(estaticos, [(b"if-none-match", r.headers["etag"].encode())])
+            self.assertEqual(r2.status_code, 304)
+            self.assertEqual(r2.headers["cache-control"], "no-cache")
+        asyncio.run(probar())
 
 
 class VideoSubidoACompas(unittest.TestCase):
@@ -1739,6 +1904,106 @@ class VideoSubidoACompas(unittest.TestCase):
                 if t.lector:
                     t.lector.detener()
                 s.alertas.cerrar()
+                s.encuesta.cerrar()
+
+    def _trabajador_con_video(self, d, s, segundos=2.0):
+        """Trabajador de prueba que se maneja a mano (cuadro por cuadro) con un video de verdad y un detector falso."""
+        from vigia.camara import Lector
+
+        class Detector:
+            vistos: list = []
+            cada_n = None
+            reinicios = 0
+
+            def procesar(self, frame, t):
+                self.vistos.append(t)
+                return Observacion(t=t)
+
+            def reiniciar_seguimiento(self):
+                self.reinicios += 1
+
+        class SinRostros:
+            disponible = False
+
+        t = s.trabajadores["demo"]
+        t._parar = True
+        t.demo, t.sim = False, None
+        t.detector, t.rostros = Detector(), SinRostros()
+        t.lector = Lector(self._video(d, segundos=segundos), fps_analisis=10)
+        return t
+
+    def test_volver_al_principio_en_cualquier_momento(self):
+        """El botón ⏮ vuelve a empezar el video aunque no haya terminado, también estando en pausa, olvidando lo
+        aprendido de la escena pero conservando las falsas alarmas del operador."""
+        from vigia.servidor import Sistema
+        with tempfile.TemporaryDirectory() as d:
+            cfg = copy.deepcopy(CFG)
+            cfg["camaras"] = []
+            s = Sistema(cfg, Path(d), demo=True)
+            t = None
+            try:
+                t = self._trabajador_con_video(d, s, segundos=3.0)
+                t.reglas.ignorar = [[1, 1, 5, 5]]
+                for _ in range(4):
+                    self._esperar(lambda: not t.lector._tomado)
+                    t._paso()
+                self.assertFalse(t.lector.terminado)                 # el video va por el principio, no terminó
+                t.pausar(True)
+                self.assertTrue(t.estado["pausado"])
+                self.assertTrue(t.volver_a_empezar())                # también estando en pausa
+                self.assertFalse(t.estado["pausado"])                # y lo reanuda
+                self.assertFalse(t.lector.pausado)
+                self.assertTrue(self._esperar(lambda: t.lector.vuelta == 1 and not t.lector._tomado))
+                t._paso()
+                self.assertEqual(t.detector.reinicios, 1)            # olvidó la vuelta anterior
+                self.assertEqual(t.reglas.ignorar, [[1, 1, 5, 5]])   # pero no las falsas alarmas marcadas
+                self.assertAlmostEqual(t.detector.vistos[-1], t.lector._desfase + 0.1, delta=0.05)   # volvió al principio
+            finally:
+                if t is not None and t.lector:
+                    t.lector.detener()
+                s.alertas.cerrar()
+                s.encuesta.cerrar()
+
+    def test_no_se_vuelve_a_empezar_una_camara_en_vivo(self):
+        from vigia.servidor import Sistema
+        with tempfile.TemporaryDirectory() as d:
+            cfg = copy.deepcopy(CFG)
+            cfg["camaras"] = []
+            s = Sistema(cfg, Path(d), demo=True)
+            try:
+                t = s.trabajadores["demo"]
+                t._parar = True
+                t.demo = False
+                t.lector = None                                       # sin video con duración: como una webcam
+                self.assertFalse(t.pausable)
+                self.assertFalse(t.volver_a_empezar())
+            finally:
+                s.alertas.cerrar()
+                s.encuesta.cerrar()
+
+    def test_volver_al_principio_en_el_modo_demo(self):
+        """La escena simulada también vuelve al segundo 0 y empieza de cero (personas, objetos, reglas)."""
+        from vigia.servidor import Sistema
+        with tempfile.TemporaryDirectory() as d:
+            cfg = copy.deepcopy(CFG)
+            cfg["camaras"] = []
+            s = Sistema(cfg, Path(d), demo=True)
+            try:
+                from vigia.simulador import Simulador
+                t = s.trabajadores["demo"]
+                t._parar = True
+                t.sim = t.sim or Simulador()                          # el hilo de la cámara lo crea al arrancar
+                t.reglas.ignorar = [[1, 1, 5, 5]]
+                t._t0 = t._reloj() - 50                               # van 50 s de guion
+                self.assertTrue(t.volver_a_empezar())
+                self.assertAlmostEqual(t._reloj() - t._t0, 0.0, delta=0.5)
+                self.assertTrue(t._reiniciar)
+                t._paso()
+                self.assertFalse(t._reiniciar)
+                self.assertEqual(t.reglas.ignorar, [[1, 1, 5, 5]])
+            finally:
+                s.alertas.cerrar()
+                s.encuesta.cerrar()
 
 
 class RendimientoEnVivo(unittest.TestCase):
@@ -1930,6 +2195,7 @@ class SegundaMirada(unittest.TestCase):
                 for w in s.trabajadores.values():
                     w.detener()
                 s.alertas.cerrar()
+                s.encuesta.cerrar()
 
 
 class ChequeoPrevio(unittest.TestCase):
@@ -1992,6 +2258,7 @@ class ChequeoPrevio(unittest.TestCase):
                 for w in s.trabajadores.values():
                     w.detener()
                 s.alertas.cerrar()
+                s.encuesta.cerrar()
 
     def test_retos_de_arrebato_y_forcejeo(self):
         from vigia.reto import POR_ID
@@ -2054,6 +2321,7 @@ class SegundaMiradaEnLaCamara(unittest.TestCase):
                 if t.revisor:
                     t.revisor.detener()
                 s.alertas.cerrar()
+                s.encuesta.cerrar()
 
 
 class CondicionesReales(unittest.TestCase):
@@ -2171,3 +2439,4 @@ class ZonasEnVideoPausado(unittest.TestCase):
                 for w in s.trabajadores.values():
                     w.detener()
                 s.alertas.cerrar()
+                s.encuesta.cerrar()

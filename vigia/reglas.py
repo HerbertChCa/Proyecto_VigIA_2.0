@@ -274,24 +274,59 @@ def largo_cuerpo(m: Muestra) -> float:
     return float(np.linalg.norm(cab - cad) + np.linalg.norm(cad - pies))
 
 
-def esta_tendido(m: Muestra, umbral: float, alto_ref: float) -> bool:
+def medidas_tendido(m: Muestra, alto_ref: float, puntos_cabeza_min: int = 3) -> dict:
+    """Las medidas verticales (en alturas de pie) que usa `esta_tendido`; None si faltan los puntos para medirlas.
+    - pies_cadera: de la cadera a los tobillos (de pie, unas 0.45-0.5; aplastado, cerca de 0)
+    - cadera_cabeza: de la cabeza a la cadera; None si menos de `puntos_cabeza_min` de los 5 puntos de la cabeza
+      superan 0.3 (de noche o de espaldas la cabeza se mide con 1 o 2 puntos casi sin confianza y la medida
+      salta alrededor del umbral). Sin información de confianza se usa como antes.
+    - cadera_cabeza_cruda: la misma medida sin esa condición, para diagnóstico
+    - canilla: de las rodillas a los tobillos
+    - conf_min: la menor confianza entre TODOS esos puntos (también los que la regla descarta por estar bajo 0.3)
+    - conf_cabeza, conf_cadera, conf_rodillas, conf_tobillos: confianza media de cada grupo de puntos;
+      n_cabeza: cuántos de los 5 puntos de la cabeza superan 0.3 (los únicos que cuentan para medirla)
+    Sirve también para diagnosticar una alerta de «persona en el suelo» (scripts/diagnosticar_video.py)."""
+    cad = _medio(m, CADERA_I, CADERA_D)
+    cab, pies = _media(m, CABEZA), _media(m, (TOBILLO_I, TOBILLO_D))
+    rodillas = _media(m, (RODILLA_I, RODILLA_D))
+    alto = max(alto_ref, largo_cuerpo(m) / 0.85, 1.0)
+    n_cab = None if m.conf_puntos is None else int(sum(m.conf_puntos[i] >= 0.3 for i in CABEZA))
+    cab_util = cab if (n_cab is None or n_cab >= puntos_cabeza_min) else None
+    confs = []
+    grupo = lambda idx: None if m.conf_puntos is None else float(np.mean([m.conf_puntos[i] for i in idx]))
+    if m.conf_puntos is not None:
+        confs = [float(m.conf_puntos[i]) for i in (*CABEZA, CADERA_I, CADERA_D, RODILLA_I, RODILLA_D,
+                                                   TOBILLO_I, TOBILLO_D)]
+    return {
+        "alto": alto,
+        "conf_cabeza": grupo(CABEZA),
+        "n_cabeza": n_cab,
+        "conf_cadera": grupo((CADERA_I, CADERA_D)),
+        "conf_rodillas": grupo((RODILLA_I, RODILLA_D)),
+        "conf_tobillos": grupo((TOBILLO_I, TOBILLO_D)),
+        "pies_cadera": None if cad is None or pies is None else float((pies[1] - cad[1]) / alto),
+        "cadera_cabeza": None if cad is None or cab_util is None else float((cad[1] - cab_util[1]) / alto),
+        "cadera_cabeza_cruda": None if cad is None or cab is None else float((cad[1] - cab[1]) / alto),
+        "canilla": None if rodillas is None or pies is None else float((pies[1] - rodillas[1]) / alto),
+        "conf_min": min(confs) if confs else None,
+    }
+
+
+def esta_tendido(m: Muestra, umbral: float, alto_ref: float, puntos_cabeza_min: int = 3) -> bool:
     """¿La persona quedó en el suelo? Se mira cuánto se «aplastó» el cuerpo en vertical respecto de su altura
     de pie: cabeza casi a la altura de la cadera y cadera casi a la altura de los pies. Esa medida no depende
     de hacia dónde mire la cámara ni de hacia dónde cayó la persona (de costado, hacia la cámara o alejándose,
     con la cámara a la altura del pecho o elevada como una de seguridad). Inclinarse a recoger algo no cuenta:
     las piernas siguen sosteniendo la cadera.
     """
-    cad = _medio(m, CADERA_I, CADERA_D)
-    cab, pies = _media(m, CABEZA), _media(m, (TOBILLO_I, TOBILLO_D))
-    alto = max(alto_ref, largo_cuerpo(m) / 0.85, 1.0)
-    if cad is not None and pies is not None and (pies[1] - cad[1]) / alto >= 0.35:
+    d = medidas_tendido(m, alto_ref, puntos_cabeza_min)
+    if d["pies_cadera"] is not None and d["pies_cadera"] >= 0.35:
         return False                       # de pie, inclinado o agachado: las piernas sostienen la cadera
-    if cad is not None and cab is not None and (cad[1] - cab[1]) / alto >= 0.33:
+    if d["cadera_cabeza"] is not None and d["cadera_cabeza"] >= 0.33:
         return False                       # sentado o en cuclillas: el tronco sigue erguido sobre la cadera
-    rodillas = _media(m, (RODILLA_I, RODILLA_D))
-    if rodillas is not None and pies is not None and (pies[1] - rodillas[1]) / alto >= 0.18:
+    if d["canilla"] is not None and d["canilla"] >= 0.18:
         return False                       # agachado para recoger algo: las canillas siguen verticales
-    if cad is not None and cab is not None and pies is not None:
+    if d["pies_cadera"] is not None and d["cadera_cabeza"] is not None:
         return True                        # cuerpo aplastado en vertical: tendido, mire de donde mire la cámara
     return es_horizontal(m, umbral)        # faltan puntos (persona tapada o lejos): ángulo del tronco o caja
 
@@ -569,19 +604,23 @@ class Reglas:
             if pista is None or not pista.muestras:
                 continue
             est = pista.estado.setdefault("caida", {"horiz_desde": None, "vert_desde": t,
-                                                     "caida": False, "suelo": False})
+                                                     "caida": False, "suelo": False,
+                                                     "n_tendido": 0, "n_horizontal": 0})
             ultima = pista.muestras[-1]
             # la altura de pie se fija al empezar a caer: tendida en el suelo, la caja ya no sirve de escala
             alto = est["alto_ref"] if est["horiz_desde"] is not None and est.get("alto_ref") else pista.alto_de_pie(t, 6.0)
-            if esta_tendido(ultima, c["angulo_horizontal"], alto):
+            if esta_tendido(ultima, c["angulo_horizontal"], alto, c.get("puntos_cabeza_min", 3)):
                 if est["horiz_desde"] is None:
                     est["horiz_desde"], est["alto_ref"] = t, alto
                 est["vert_desde"] = None
+                # ¿el tronco se ve realmente horizontal? Es la única señal que no sale de las medidas de «cuerpo aplastado»
+                est["n_tendido"] += 1
+                est["n_horizontal"] += bool(es_horizontal(ultima, c["angulo_horizontal"]))
             else:
                 if est["vert_desde"] is None:
                     est["vert_desde"] = t
                 if t - est["vert_desde"] >= 1.0:   # se levantó: se reinicia el episodio
-                    est.update(horiz_desde=None, caida=False, suelo=False)
+                    est.update(horiz_desde=None, caida=False, suelo=False, n_tendido=0, n_horizontal=0)
                 continue
             tendido = t - est["horiz_desde"]
             alto = max(est["alto_ref"], largo_cuerpo(ultima) / 0.85, 1.0)
@@ -608,7 +647,12 @@ class Reglas:
                                 f"a cuerpo) en los 3 s previos a la caída, y #{p.id} quedó en el suelo.",
                                 f"violencia:derribo:{agresor}:{p.id}",
                                 [p.caja.tolist()] + ([otro.caja.tolist()] if otro is not None else [])))
-            if not est["suelo"] and tendido >= c["en_suelo_alerta"]:
+            # «Cuerpo aplastado» sale de puntos que el modelo inventa cuando algo tapa a la persona (un mostrador, una
+            # mesa, una moto): de pie y con las piernas ocultas también se ve «aplastada». Por eso no basta el estado;
+            # hace falta verla CAER (el cuerpo bajó) o ver el tronco realmente horizontal la mayor parte del tiempo.
+            respaldo = (not c.get("exigir_respaldo", True) or est["caida"]
+                        or est["n_horizontal"] >= c.get("horizontal_min", 0.5) * max(est["n_tendido"], 1))
+            if not est["suelo"] and tendido >= c["en_suelo_alerta"] and respaldo:
                 est["suelo"] = True
                 out.append(Evento(
                     "en_suelo", "alta", f"Persona #{p.id} tendida en el suelo",

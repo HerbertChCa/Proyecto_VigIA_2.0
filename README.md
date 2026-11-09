@@ -156,7 +156,8 @@ En el panel, **+ Cámara** tiene dos pestañas:
 **Videos subidos.** Un video se analiza a 10 cuadros por cada segundo de video (`fps_objetivo`), aunque la
 computadora sea lenta: si no le da para más, el video avanza en cámara lenta (la tarjeta dice, por ejemplo,
 «cámara lenta ×0.30») en vez de saltarse cuadros. Así un tirón de mochila de 2 s se ve en 20 cuadros y no en 2 o 3.
-Con el botón ⏸ de la tarjeta se pausa; al terminar, el video queda en el último cuadro y ↻ lo vuelve a empezar
+Con el botón ⏸ de la tarjeta se pausa y con ⏮ vuelve al principio en cualquier momento (una cámara en vivo no tiene
+a dónde volver); al terminar, el video queda en el último cuadro y ↻ lo vuelve a empezar
 (desde cero: personas, objetos y reglas, sin borrar las alertas). Para que se repita solo, por ejemplo en una feria,
 ponga `repetir_videos: true` en `config.yaml`. Con varios videos a la vez cada uno va más lento, porque comparten la
 computadora: para una prueba, deje solo el que quiere ver.
