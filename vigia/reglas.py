@@ -385,6 +385,7 @@ class Reglas:
         if self._t0 is None:
             self._t0 = obs.t
         self._hist = hist                      # para la segunda mirada (vigia/revision.py: sospecha)
+        self._tam = (ancho, alto)              # para saber si alguien salió por el borde de la imagen
         self._rap = self._rapidez(obs, hist)
         self._registrar_contactos(obs, hist)
         if r["violencia"]["activa"]:
@@ -1014,7 +1015,7 @@ class Reglas:
         if not con_alguien or a not in personas:
             return None
         t_ult, ultima = con_alguien[-1]                       # la última vez que alguien la tenía
-        if t - t_ult > 3.0 or rec["ult"] - t_ult > 1.3:
+        if t - t_ult > 5.0 or rec["ult"] - t_ult > 1.3:
             return None                                       # siguió viéndose sola más que el sostén del filtro
         paso = float(np.median(np.diff([tm for tm, _ in rec["muestras"]]))) if len(rec["muestras"]) > 1 else 0.1
         finales = [q for tm, q in rec["muestras"] if t_ult - tm <= max(1.5, 3 * paso)]
@@ -1024,6 +1025,12 @@ class Reglas:
         b = max(otros, key=lambda x: sum(x in q for q in finales))
         if sum(b in q for q in finales) < 2 or b in personas or b not in hist.personas:
             return None                                       # pocas muestras, o quien la tenía sigue en la imagen
+        # Una mochila oscura y borrosa en pleno tirón, entre los dos cuerpos, deja de detectarse antes de que el
+        # ladrón salga (video de la feria: 2.7 s antes). Si se perdió mientras los dos la sujetaban, se acepta que
+        # b salga hasta 4 s después, pero solo por el borde de la imagen: irse del cuadro, no quedarse tapado.
+        perdida_en_tiron = sum(a in q and b in q for q in finales) >= 2 and a in ultima
+        if not perdida_en_tiron and t - t_ult > 3.0:
+            return None
         # pasó de las manos del dueño a las de b hace poco (no la recogió del piso mucho después)...
         con_dueno = [tm for tm, q in rec["muestras"] if a in q]
         if not con_dueno or t_ult - con_dueno[-1] > max(3.0, 3 * paso):
@@ -1035,7 +1042,10 @@ class Reglas:
         if not movida and not any(a in q and b in q for q in finales):
             return None
         salio = hist.personas[b].ultima_vez
-        if abs(salio - t_ult) > 1.0:
+        if perdida_en_tiron and abs(salio - t_ult) > 1.0:
+            if not -1.0 <= salio - t_ult <= 4.0 or not self._por_el_borde(hist.personas[b].muestras[-1].caja):
+                return None                                   # se fue mucho después, o desapareció en medio de la imagen
+        elif abs(salio - t_ult) > 1.0:
             return None                                       # la mochila y esa persona no se fueron juntas
         if any(o.clase == rec["clase"] and sostiene(personas[a], o.caja, c["distancia_mano"], o.clase)
                for o in obs.objetos):
@@ -1045,8 +1055,19 @@ class Reglas:
             "hurto", "alta", f"Posible arrebato: la persona #{b} se llevó la {rec['clase']} de #{a} fuera de la cámara",
             f"La {rec['clase']} la llevaba la persona #{a}; la persona #{b} la sujetó"
             + (f" (forcejeo en {lucha} cuadros)" if lucha else "") + f" y {t - salio:.1f} s antes de este cuadro "
-            f"salió de la imagen con ella: la {rec['clase']} dejó de verse a la vez que #{b}, y #{a} sigue aquí sin ella.",
+            f"salió de la imagen con ella: " + (
+                f"la {rec['clase']} dejó de verse a la vez que #{b}" if abs(salio - t_ult) <= 1.0 else
+                f"la {rec['clase']} dejó de verse en pleno tirón y {salio - t_ult:.1f} s después #{b} salió por el borde")
+            + f", y #{a} sigue aquí sin ella.",
             f"arrebato:{rec['id']}:{b}", [list(map(float, personas[a].caja))])
+
+    def _por_el_borde(self, caja, margen: float = 0.06) -> bool:
+        """La última caja de alguien toca el borde izquierdo o derecho de la imagen (salió del cuadro por un lado;
+        el borde de abajo no cuenta: quien está cerca de la cámara lo toca con los pies sin irse)."""
+        ancho = getattr(self, "_tam", (0, 0))[0]
+        if not ancho:
+            return True
+        return caja[0] <= margen * ancho or caja[2] >= (1 - margen) * ancho
 
     # ---- robo de vehículos: alguien distinto de quien lo estacionó lo manipula o se lo lleva
     def _vehiculos(self, obs) -> list[Evento]:
