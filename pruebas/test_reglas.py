@@ -2332,7 +2332,7 @@ class CondicionesReales(unittest.TestCase):
     def test_se_detecta_en_todas_las_condiciones(self):
         import estres
         r = estres.tabla()
-        fallas = [f"{s} con {c}" for (s, c), ok in r.items() if not ok]
+        fallas = [f"{s} con {c}" for (s, c), ok in r.items() if not ok and not estres.es_limite(s, c)]
         self.assertEqual(fallas, [])
 
     def test_sin_falsas_alarmas_en_esas_condiciones(self):

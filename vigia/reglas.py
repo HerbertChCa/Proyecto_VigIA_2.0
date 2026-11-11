@@ -942,6 +942,7 @@ class Reglas:
             vistos.add(rec["id"])
             rec.update(centro=o.centro.copy(), diag=diag, ult=t, caja=o.caja.copy())
             rec["muestras"] = [m for m in rec["muestras"] if t - m[0] <= 8.0] + [(t, quienes)]
+            rec["trayecto"] = [m for m in rec.get("trayecto", []) if t - m[0] <= 8.0] + [(t, o.centro.copy())]
             if len(quienes) >= 2:
                 rec["forcejeo"] = [x for x in rec["forcejeo"] if t - x <= 6.0] + [t]
             if rec["dueno"] is None:                         # lo lleva una sola persona de forma sostenida
@@ -955,6 +956,14 @@ class Reglas:
             if rec["avisado"] or rec["dueno"] is None:
                 continue
             a = rec["dueno"]
+            con_alguien = [tm for tm, q in rec["muestras"] if q]
+            # el filtro de objetos sostiene un objeto perdido 1 s en su último lugar (sin nadie): eso no es «verlo»
+            if con_alguien and t - con_alguien[-1] >= 0.6:
+                ev = self._se_la_llevo(rec, a, t, personas, hist, obs, c)
+                if ev is not None:
+                    rec["avisado"] = True
+                    out.append(ev)
+                    continue
             # con pocos cuadros por segundo, «lo tiene el otro desde hace 0.6 s» puede ser un solo cuadro:
             # la ventana se alarga para que haya al menos dos
             paso = float(np.median(np.diff([tm for tm, _ in rec["muestras"]]))) if len(rec["muestras"]) > 1 else 0.1
@@ -996,6 +1005,48 @@ class Reglas:
                 f"arrebato:{rec['id']}:{b}", [rec["caja"].tolist(), list(map(float, pb.caja))]))
         self._portes = [r for r in self._portes if t - r["ult"] <= 6.0]
         return out
+
+    def _se_la_llevo(self, rec, a, t, personas, hist, obs, c) -> Optional[Evento]:
+        """Arrebato que termina fuera de la cámara (prueba de la feria): tras el tirón, quien se quedó con la mochila
+        sale corriendo del cuadro en menos de un segundo, borroso, y el detector deja de ver a la mochila y a esa
+        persona casi a la vez. El dueño sigue en la imagen y ya no la tiene."""
+        con_alguien = [(tm, q) for tm, q in rec["muestras"] if q]
+        if not con_alguien or a not in personas:
+            return None
+        t_ult, ultima = con_alguien[-1]                       # la última vez que alguien la tenía
+        if t - t_ult > 3.0 or rec["ult"] - t_ult > 1.3:
+            return None                                       # siguió viéndose sola más que el sostén del filtro
+        paso = float(np.median(np.diff([tm for tm, _ in rec["muestras"]]))) if len(rec["muestras"]) > 1 else 0.1
+        finales = [q for tm, q in rec["muestras"] if t_ult - tm <= max(1.5, 3 * paso)]
+        otros = [x for x in ultima if x != a]
+        if not otros:
+            return None                                       # la última vez que se vio, nadie más la tenía
+        b = max(otros, key=lambda x: sum(x in q for q in finales))
+        if sum(b in q for q in finales) < 2 or b in personas or b not in hist.personas:
+            return None                                       # pocas muestras, o quien la tenía sigue en la imagen
+        # pasó de las manos del dueño a las de b hace poco (no la recogió del piso mucho después)...
+        con_dueno = [tm for tm, q in rec["muestras"] if a in q]
+        if not con_dueno or t_ult - con_dueno[-1] > max(3.0, 3 * paso):
+            return None
+        # ...y b la movió (se la llevó o forcejearon): quedarse parado junto a una mochila en el piso no es llevársela
+        con_b = [tm for tm, q in rec["muestras"] if b in q]
+        tray = [c_ for tm, c_ in rec.get("trayecto", []) if con_b[0] <= tm <= t_ult]
+        movida = len(tray) > 1 and float(np.linalg.norm(tray[-1] - tray[0])) >= 0.5 * rec["diag"]
+        if not movida and not any(a in q and b in q for q in finales):
+            return None
+        salio = hist.personas[b].ultima_vez
+        if abs(salio - t_ult) > 1.0:
+            return None                                       # la mochila y esa persona no se fueron juntas
+        if any(o.clase == rec["clase"] and sostiene(personas[a], o.caja, c["distancia_mano"], o.clase)
+               for o in obs.objetos):
+            return None                                       # el dueño la recuperó
+        lucha = len([x for x in rec["forcejeo"] if t - x <= 6.0])
+        return Evento(
+            "hurto", "alta", f"Posible arrebato: la persona #{b} se llevó la {rec['clase']} de #{a} fuera de la cámara",
+            f"La {rec['clase']} la llevaba la persona #{a}; la persona #{b} la sujetó"
+            + (f" (forcejeo en {lucha} cuadros)" if lucha else "") + f" y {t - salio:.1f} s antes de este cuadro "
+            f"salió de la imagen con ella: la {rec['clase']} dejó de verse a la vez que #{b}, y #{a} sigue aquí sin ella.",
+            f"arrebato:{rec['id']}:{b}", [list(map(float, personas[a].caja))])
 
     # ---- robo de vehículos: alguien distinto de quien lo estacionó lo manipula o se lo lleva
     def _vehiculos(self, obs) -> list[Evento]:
@@ -1058,7 +1109,24 @@ class Reglas:
             if t - tc > c["ventana"]:
                 del self._contactos[(a, b)]
                 continue
-            if a not in act or a not in hist.personas or (a, b) not in self._contactos:
+            if a not in hist.personas or (a, b) not in self._contactos:
+                continue
+            if a not in act:
+                # tocó y salió de la imagen corriendo (prueba de la feria: borroso, menos de un segundo visible)
+                pa_h = hist.personas[a]
+                salio = pa_h.ultima_vez
+                va = velocidad_cuerpo(pa_h, salio, ventana=0.6)   # se lo vio correr medio segundo, a veces menos
+                vb = velocidad_cuerpo(hist.personas[b], t) if b in hist.personas else 0.0
+                if (b in act and 0.3 <= t - salio <= 2.0 and 0 <= salio - tc <= 2.0
+                        and va >= 0.6 * c["velocidad"] and vb < 0.6 * c["velocidad"]):
+                    out.append(Evento(
+                        "robo_huida", "alta", f"Posible asalto o arrebato: la persona #{a} tocó a #{b} y salió corriendo",
+                        f"La mano o el pie de #{a} llegó al cuerpo de #{b}; {salio - tc:.1f} s después #{a} salió de la "
+                        f"imagen a {va:.1f} alturas/s (umbral {0.6 * c['velocidad']:.1f} para quien sale del cuadro), "
+                        f"mientras #{b} se quedó ({vb:.1f} alturas/s).",
+                        f"robo_huida:{a}:{b}", [act[b].caja.tolist()]))
+                    self._contactos.pop((a, b), None)
+                    self._contactos.pop((b, a), None)
                 continue
             va = velocidad_cuerpo(hist.personas[a], t)
             vb = velocidad_cuerpo(hist.personas[b], t) if b in hist.personas else 0.0

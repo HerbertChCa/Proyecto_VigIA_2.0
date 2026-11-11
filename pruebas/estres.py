@@ -93,6 +93,54 @@ def caida_sola(t):
     return [T.persona(2, b)], []
 
 
+def _mochila_en_mano(k, H_=None):
+    """Caja de una mochila agarrada por la muñeca derecha del esqueleto k."""
+    w = k[10]
+    return np.array([w[0] - 0.09 * H, w[1] - 0.05 * H, w[0] + 0.09 * H, w[1] + 0.22 * H])
+
+
+def arrebato_sale(t):
+    """Como el video de prueba de la feria: A tiene la mochila; B llega corriendo, forcejean 1.5 s, B se la queda y
+    sale del cuadro en medio segundo. A se queda sin ella."""
+    a = esqueleto(300, 470, "quieto", t, 0, 1, 0)
+    ps, objs = [T.persona(1, a)], []
+    if t < 6.0:
+        objs.append(Objeto(40, "mochila", _mochila_en_mano(a)))
+    if 5.0 <= t < 9.2:
+        if t < 6.0:
+            xb = 900 - (t - 5.0) * 500
+        elif t < 8.5:
+            xb = 400 + 0.05 * H * math.sin(9 * t)
+        else:
+            xb = 400 + (t - 8.5) * 2.8 * H
+        b = esqueleto(xb, 470, "camina" if (t < 6 or t >= 8.5) else "quieto", t, xb, -1 if t < 6 else 1, 0)
+        ps.append(T.persona(2, b))
+        if 6.0 <= t < 8.5:                          # forcejeo: los dos sujetan la mochila entre ellos
+            objs.append(Objeto(40, "mochila", np.array([330, 380, 400, 450.0])))
+        elif t >= 8.5 and xb < ANCHO - 30:
+            objs.append(Objeto(41, "mochila", _mochila_en_mano(b)))
+    return ps, objs
+
+
+def toca_y_sale(t):
+    """A está parado; B llega caminando, le toca el hombro y sale corriendo del cuadro."""
+    a = esqueleto(500, 470, "quieto", t, 0, 1, 0)
+    ps = [T.persona(1, a)]
+    if 1.0 <= t < 3.0:
+        xb = 1000 - (t - 1.0) * 200
+    elif t < 3.6:
+        xb = 600.0
+    else:
+        xb = 600 + (t - 3.6) * 3.0 * H
+    if 1.0 <= t and xb < ANCHO + 20:
+        b = esqueleto(xb, 470, "camina" if t < 3.0 or t >= 3.6 else "quieto", t, xb, -1 if t < 3.6 else 1, 0)
+        if 3.0 <= t < 3.6:                          # la mano sube al hombro de A en 0.3 s y se queda ahí
+            f = min(1.0, (t - 3.0) / 0.3)
+            b[10] = (1 - f) * b[10] + f * (a[6] + np.array([10, 5]))
+        ps.append(T.persona(2, b))
+    return ps, []
+
+
 SITUACIONES = [
     # nombre, generador (fábrica), segundos, tipo esperado, zonas, filtro de mensaje
     ("merodeo", demo, 40, "merodeo", ZONAS_DEMO, None),
@@ -110,6 +158,8 @@ SITUACIONES = [
     ("arma", lambda: arma, 5, "arma", (), None),
     ("aglomeración", lambda: multitud(16, 0.0), 7, "aglomeracion", (), None),
     ("huida masiva", lambda: multitud(5, 2.5), 6.5, "estampida", (), None),
+    ("arrebato y sale", lambda: arrebato_sale, 11, "hurto", (), "arrebato"),
+    ("toca y sale", lambda: toca_y_sale, 6, "robo_huida", (), None),
 ]
 
 
@@ -173,6 +223,25 @@ def grupo_caminando(t):
     return multitud(10, 0.8)(t)
 
 
+def saluda_y_se_va(t):
+    """B le toca el hombro a A (un saludo) y se va caminando del cuadro."""
+    ps, objs = toca_y_sale(t)
+    if t >= 3.6 and len(ps) > 1:
+        xb = 600 + (t - 3.6) * 0.6 * H
+        ps[1] = T.persona(2, esqueleto(xb, 470, "camina", t, xb, 1, 0)) if xb < ANCHO + 20 else ps[1]
+        if xb >= ANCHO + 20:
+            ps = ps[:1]
+    return ps, objs
+
+
+def tiron_fallido(t):
+    """B intenta quitarle la mochila a A, no puede y se va corriendo sin ella."""
+    ps, objs = arrebato_sale(t)
+    if t >= 8.5:
+        objs = [Objeto(40, "mochila", _mochila_en_mano(ps[0].puntos))]
+    return ps, objs
+
+
 NEGATIVOS = [
     # nombre, generador, segundos, tipos que NO deben salir, zonas
     ("cruzarse caminando", demo, 14, {"violencia", "robo_huida", "hurto"}, ZONAS_DEMO),
@@ -183,7 +252,19 @@ NEGATIVOS = [
     ("dueño recoge su mochila", lambda: dueno_recoge, 26, {"hurto"}, ()),
     ("pasar por una zona", lambda: paso_por_zona, 6, {"merodeo"}, ZONAS_DEMO),
     ("grupo caminando", lambda: grupo_caminando, 8, {"aglomeracion", "estampida", "violencia"}, ()),
+    ("saluda y se va caminando", lambda: saluda_y_se_va, 8, {"robo_huida", "hurto"}, ()),
+    ("tirón fallido", lambda: tiron_fallido, 11, {"hurto"}, ()),
 ]
+
+
+# Límites conocidos: quien arrebata o toca y sale del cuadro en menos de un segundo se ve en 1 o 2 cuadros si la PC
+# analiza menos de 5 por segundo. En vivo lo cubre la segunda mirada y un video subido se analiza en modo Detallado,
+# los dos a 10 cuadros por segundo; la tabla los marca como «2ª mirada».
+LIMITES = {("arrebato y sale", "PC lenta"), ("toca y sale", "PC lenta")}
+
+
+def es_limite(situacion: str, condicion: str) -> bool:
+    return any(situacion == s and condicion.startswith(c) for s, c in LIMITES)
 
 
 # ------------------------------------------------------------------ condiciones reales
@@ -324,7 +405,8 @@ if __name__ == "__main__":
     conds = list(dict.fromkeys(c for _, c in r))
     print(f"{'situación':20s} " + " | ".join(f"{c[:14]:14s}" for c in conds))
     for s in dict.fromkeys(s for s, _ in r):
-        print(f"{s:20s} " + " | ".join(f"{'sí' if r[(s, c)] else 'NO':14s}" for c in conds))
+        print(f"{s:20s} " + " | ".join(
+            f"{'sí' if r[(s, c)] else ('2ª mirada' if es_limite(s, c) else 'NO'):14s}" for c in conds))
     print("\nFalsas alarmas (debe estar todo vacío):")
     f = falsas()
     for s in dict.fromkeys(s for s, _ in f):

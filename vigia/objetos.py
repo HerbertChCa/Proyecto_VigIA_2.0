@@ -81,7 +81,10 @@ class FiltroObjetos:
             if prev.clase not in (o.clase, DOS_RUEDAS) and self.clase(oid) != o.clase:
                 continue
             centro = np.array([(prev.caja[0] + prev.caja[2]) / 2, (prev.caja[1] + prev.caja[3]) / 2])
-            if float(np.linalg.norm(centro - np.asarray(o.centro))) <= 1.0 * max(diag, 1.0):
+            # quieto, a menos de su tamaño; si pasó tiempo, más lejos: una mochila arrebatada viaja en la mano de
+            # alguien que corre, y con pocos cuadros por segundo aparece bastante más allá
+            dt = t - self._ultima.get(oid, t)
+            if float(np.linalg.norm(centro - np.asarray(o.centro))) <= (1.0 + 4.0 * dt) * max(diag, 1.0):
                 for clase, v in self._votos[oid].items():
                     self._votos[o.id][clase] += v
                 self._confirmados.add(o.id)
