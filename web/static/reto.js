@@ -67,8 +67,19 @@ function mostrarCapa(grande, texto, clase = "") {
 function ocultarCapa() { $("#capa").hidden = true; $("#barra-tiempo").hidden = true; }
 
 // ------------------------------------------------------------------ desarrollo de un intento
+// Si la cámara elegida es un video subido que está en pausa o terminó, el reto lo pone a correr solo (antes había
+// que volver al panel y darle ▶). Un video terminado vuelve a empezar desde el principio.
+async function ponerEnMarcha() {
+  const c = estadoCamaras.find((x) => x.id === camara());
+  if (!c || !c.pausable || !(c.pausado || c.terminado)) return;
+  try {
+    await api(`/api/camaras/${c.id}/pausa`, { method: "POST", body: JSON.stringify({ pausado: false }) });
+    c.pausado = false; c.terminado = false;
+  } catch (e) { console.error(e); }
+}
 function empezar() {
   if (!elegido || bloqueo(elegido)) return;
+  ponerEnMarcha();
   fase = "cuenta"; clearTimeout(cierre);
   $("#btn-empezar").hidden = true; $("#btn-cancelar").hidden = false;
   let n = 3;

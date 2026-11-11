@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import copy
 import json
 import logging
@@ -280,15 +281,17 @@ def crear_app(cfg: dict, datos: Path, demo: bool = False, feria: bool = False) -
         cid = req.path_params["cid"]
 
         async def flujo():
-            ultimo = None
+            ultimo, enviado = None, 0.0
             while True:
                 if await req.is_disconnected():
                     break
                 t = sis.trabajadores.get(cid)
                 if t is None:
                     break
-                if t.jpeg is not None and t.jpeg is not ultimo:
-                    ultimo = t.jpeg
+                # un video en pausa o terminado no cambia de imagen; Chrome solo muestra un cuadro de este flujo cuando
+                # llega el siguiente, así que la página del reto se quedaba en negro: se reenvía el mismo cada segundo
+                if t.jpeg is not None and (t.jpeg is not ultimo or time.time() - enviado >= 1.0):
+                    ultimo, enviado = t.jpeg, time.time()
                     yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " +
                            str(len(ultimo)).encode() + b"\r\n\r\n" + ultimo + b"\r\n")
                 await asyncio.sleep(0.05)
